@@ -204,7 +204,9 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
 
 
     let requestModel = (aiModel === 'reverse_proxy' || aiModel === 'openrouter') ? db.proxyRequestModel : aiModel
-    let openrouterRequestModel = db.openrouterRequestModel
+    const useSubOpenrouterModel = arg.mode && arg.mode !== 'model' && !!db.openrouterSubRequestModel
+    const selectedOpenrouterModel = useSubOpenrouterModel ? db.openrouterSubRequestModel : db.openrouterRequestModel
+    let openrouterRequestModel = selectedOpenrouterModel
     if(aiModel === 'reverse_proxy'){
         requestModel = db.customProxyRequestModel
     }
@@ -212,7 +214,7 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
         requestModel = db.nanogptRequestModel
     }
 
-    if(aiModel === 'openrouter' && db.openrouterRequestModel === 'risu/free'){
+    if(aiModel === 'openrouter' && selectedOpenrouterModel === 'risu/free'){
         openrouterRequestModel = await getFreeOpenRouterModels()
     }
 

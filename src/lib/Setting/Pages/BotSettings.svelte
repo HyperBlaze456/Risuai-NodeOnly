@@ -277,11 +277,19 @@
         <span class="text-textcolor mt-4">OpenRouter {language.apiKey}</span>
         <TextInput hideText={DBState.db.hideApiKey} marginBottom={false} size={"sm"} bind:value={DBState.db.openrouterKey} />
 
-        <span class="text-textcolor mt-4">OpenRouter {language.model}</span>
+        <span class="text-textcolor mt-4">OpenRouter {language.model} (Main)</span>
         {#await getOpenRouterModels()}
             <ModelGrid bind:value={DBState.db.openrouterRequestModel} pinnedItems={openrouterPinnedItems} loading={true} />
         {:then m}
             <ModelGrid bind:value={DBState.db.openrouterRequestModel} items={(m ?? []).map(orToGridItem)} pinnedItems={openrouterPinnedItems} />
+        {/await}
+
+        <span class="text-textcolor mt-4">OpenRouter {language.model} (Sub / Auxiliary)</span>
+        <span class="text-textcolor2 text-xs">Used for memory, translation, emotion, and other auxiliary calls when they route through OpenRouter. Leave blank to use the main model.</span>
+        {#await getOpenRouterModels()}
+            <ModelGrid bind:value={DBState.db.openrouterSubRequestModel} pinnedItems={openrouterPinnedItems} loading={true} />
+        {:then m}
+            <ModelGrid bind:value={DBState.db.openrouterSubRequestModel} items={(m ?? []).map(orToGridItem)} pinnedItems={openrouterPinnedItems} />
         {/await}
     {/if}
     {#if DBState.db.aiModel === 'openrouter' || DBState.db.aiModel === 'reverse_proxy'}
