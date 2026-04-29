@@ -64,6 +64,7 @@ export function applyLoadout(loadout: Loadout, apply:LoadoutApplyOption[] = [
     if(apply.includes('globalVariables')) {
         DBState.db.globalChatVariables = safeStructuredClone(loadout.globalVariables)
     }
+    DBState.db.lastLoadedLoadoutName = loadout.name
 }
 
 export function saveCurrentLoadout(name: string) {
