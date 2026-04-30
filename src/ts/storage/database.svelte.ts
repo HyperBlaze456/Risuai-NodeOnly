@@ -5,7 +5,7 @@ import type { RisuPlugin } from '../plugins/plugins.svelte';
 import type {triggerscript as triggerscriptMain} from '../process/triggers';
 import { downloadFile, saveAsset as saveImageGlobal } from '../globalApi.svelte';
 import { defaultAutoSuggestPrompt, defaultJailbreak, defaultMainPrompt } from './defaultPrompts';
-import { alertNormal } from '../alert';
+import { notifySuccess } from '../alert';
 import type { NAISettings } from '../process/models/nai';
 import { prebuiltNAIpresets, prebuiltPresets } from '../process/templates/templates';
 import { defaultColorScheme, type ColorScheme } from '../gui/colorscheme';
@@ -20,6 +20,14 @@ export let appVer = "2026.2.291" //<APP_VERSION_POINT>
 export let webAppSubVer = ''
 export const nodeOnlyVer: string = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0'
 
+// 'custom' was a deprecated experimental theme (kwaroran's "not for real use now",
+// 2024-10) whose select option had been hidden but still reachable through legacy
+// DBs and theme presets. Coerce it to '' (NodeOnly Standard) at every entry point
+// so SettingSelect's auto-normalization can't silently flip it to 'customHTML'.
+export function normalizeTheme(theme: string | undefined | null): string {
+    if (theme === undefined || theme === null || theme === 'custom') return ''
+    return theme
+}
 
 export function setDatabase(data:Database){
     if(checkNullish(data.characters)){
@@ -130,9 +138,7 @@ export function setDatabase(data:Database){
     if(checkNullish(data.iconsize)){
         data.iconsize = 100
     }
-    if(checkNullish(data.theme)){
-        data.theme = ''
-    }
+    data.theme = normalizeTheme(data.theme)
     if(checkNullish(data.subModel)){
         data.subModel = 'gemini-3-flash-preview'
     }
@@ -232,6 +238,9 @@ export function setDatabase(data:Database){
     }
     if(checkNullish(data.askRemoval)){
         data.askRemoval = true
+    }
+    if(checkNullish(data.confirmReroll)){
+        data.confirmReroll = true
     }
     if(checkNullish(data.sdConfig)){
         data.sdConfig = {
@@ -381,6 +390,10 @@ export function setDatabase(data:Database){
     data.assetWidth ??= -1
     data.animationSpeed ??= 0.4
     data.colorScheme ??= safeStructuredClone(defaultColorScheme)
+    // Backfill `primary` for existing colorScheme objects saved before the
+    // primary token was added. Without this, custom-scheme users (whose object
+    // is preserved as-is) would render with an undefined CSS var.
+    data.colorScheme.primary ??= defaultColorScheme.primary
     data.colorSchemeName ??= 'default'
     data.NAIsettings.starter ??= ""
     data.hypaModel ??= 'MiniLM'
@@ -521,7 +534,6 @@ export function setDatabase(data:Database){
     data.customQuotes ??= false
     data.customQuotesData ??= ['“','”','‘','’']
     data.groupOtherBotRole ??= 'user'
-    data.customGUI ??= ''
     data.customAPIFormat ??= LLMFormat.OpenAICompatible
     data.systemContentReplacement ??= `system: {{slot}}`
     data.systemRoleReplacement ??= 'user'
@@ -669,6 +681,7 @@ export function setDatabase(data:Database){
     data.echoDelay ??= 0
     data.createFolderOnBranch ??= true
     data.hamburgerButtonBottom ??= false
+    data.hideLeftBarCollapseButton ??= false
     data.dynamicModelRegistry ??= true
     data.saveSignatures ??= false
     data.enableRisuaiProTools ??= false
@@ -944,6 +957,7 @@ export interface Database{
     bias: [string, number][]
     swipe:boolean
     instantRemove:boolean
+    confirmReroll:boolean
     textTheme: string
     customTextTheme: {
         FontColorStandard: string,
@@ -1166,7 +1180,6 @@ export interface Database{
     customQuotesData?:[string, string, string, string]
     groupTemplate?:string
     groupOtherBotRole?:string
-    customGUI:string
     guiHTML:string
     OAIPrediction:string
     customAPIFormat:LLMFormat
@@ -1331,6 +1344,7 @@ export interface Database{
     echoDelay?:number
     createFolderOnBranch?:boolean
     hamburgerButtonBottom?:boolean
+    hideLeftBarCollapseButton?:boolean
     enableRemoteSaving?:boolean
     blockquoteStyling?:boolean
     dynamicModelRegistry?:boolean
@@ -1679,7 +1693,6 @@ export interface themePreset{
     theme: string
     guiHTML: string
     customCSS: string
-    customGUI: string
     waifuWidth: number
     waifuWidth2: number
     colorSchemeName: string
@@ -2110,7 +2123,6 @@ export const themePresetTemplate: themePreset = {
     theme: '',
     guiHTML: '',
     customCSS: '',
-    customGUI: '',
     waifuWidth: 100,
     waifuWidth2: 100,
     colorSchemeName: 'default',
@@ -2430,10 +2442,9 @@ export function saveCurrentThemePreset(){
     let pres = db.themePresets
     const saved: themePreset = {
         name: pres[db.themePresetsId]?.name ?? "Default",
-        theme: db.theme,
+        theme: normalizeTheme(db.theme),
         guiHTML: db.guiHTML,
         customCSS: db.customCSS,
-        customGUI: db.customGUI,
         waifuWidth: db.waifuWidth,
         waifuWidth2: db.waifuWidth2,
         colorSchemeName: db.colorSchemeName,
@@ -2501,10 +2512,9 @@ export function changeToThemePreset(id = 0, savecurrent = true){
     const p = pres[id]
     if(!p) return
     db.themePresetsId = id
-    db.theme = p.theme ?? db.theme
+    db.theme = normalizeTheme(p.theme ?? db.theme)
     db.guiHTML = p.guiHTML ?? db.guiHTML
     db.customCSS = p.customCSS ?? db.customCSS
-    db.customGUI = p.customGUI ?? db.customGUI
     db.waifuWidth = p.waifuWidth ?? db.waifuWidth
     db.waifuWidth2 = p.waifuWidth2 ?? db.waifuWidth2
     db.colorSchemeName = p.colorSchemeName ?? db.colorSchemeName
@@ -2582,7 +2592,7 @@ export async function downloadThemePreset(id: number, type: 'json'|'risutheme' =
         downloadFile(pres.name + "_theme.risutheme", buf2)
     }
 
-    alertNormal(language.successExport)
+    notifySuccess(language.successExport)
 }
 
 export async function importThemePreset(f: {
@@ -2615,8 +2625,9 @@ export async function importThemePreset(f: {
 
     let db = getDatabase()
     pre.name = pre.name ?? "Imported Theme"
+    pre.theme = normalizeTheme(pre.theme)
     db.themePresets.push(pre)
-    alertNormal(language.successImport)
+    notifySuccess(language.successImport)
 }
 
 import { encode as encodeMsgpack, decode as decodeMsgpack } from "msgpackr/index-no-eval";
@@ -2671,7 +2682,7 @@ export async function downloadPreset(id:number, type:'json'|'risupreset'|'return
 
     }
 
-    alertNormal(language.successExport)
+    notifySuccess(language.successExport)
 
 
     return {

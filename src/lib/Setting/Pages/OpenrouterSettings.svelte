@@ -4,6 +4,7 @@
     import Check from "src/lib/UI/GUI/CheckInput.svelte";
     import SegmentedControl from "src/lib/UI/GUI/SegmentedControl.svelte";
     import SliderInput from "src/lib/UI/GUI/SliderInput.svelte";
+    import Help from "src/lib/Others/Help.svelte";
 
     import { DBState } from 'src/ts/stores.svelte';
     import ChatFormatSettings from "./ChatFormatSettings.svelte";
@@ -22,12 +23,15 @@
 <Accordion name={`OpenRouter ${language.settings}`} styled>
     <div class="flex items-center mb-4">
         <Check bind:check={DBState.db.openrouterFallback} name={language.openRouterFallback}/>
+        <Help key="openRouterFallback" />
     </div>
     <div class="flex items-center mb-4">
         <Check bind:check={DBState.db.openrouterMiddleOut} name={language.openRouterMiddleOut}/>
+        <Help key="openRouterMiddleOut" />
     </div>
     <div class="flex items-center mb-4">
         <Check bind:check={DBState.db.useInstructPrompt} name={language.useInstructPrompt}/>
+        <Help key="useInstructPrompt" />
     </div>
 
     <Accordion name={language.openRouterReasoningEffort} help="openRouterReasoningEffort" styled>
