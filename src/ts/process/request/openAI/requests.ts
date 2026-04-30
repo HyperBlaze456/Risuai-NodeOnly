@@ -436,6 +436,20 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
             }
         }
 
+        const reasoning: { effort?: string, max_tokens?: number, exclude?: boolean } = {}
+        if(db.openrouterReasoningEffort && db.openrouterReasoningEffort !== 'off'){
+            reasoning.effort = db.openrouterReasoningEffort
+        }
+        if(typeof db.openrouterReasoningMaxTokens === 'number' && db.openrouterReasoningMaxTokens > 0){
+            reasoning.max_tokens = db.openrouterReasoningMaxTokens
+        }
+        if(db.openrouterReasoningExclude){
+            reasoning.exclude = true
+        }
+        if(Object.keys(reasoning).length){
+            body.reasoning = reasoning
+        }
+
         if(db.useInstructPrompt){
             delete body.messages
             const prompt = applyChatTemplate(formated)

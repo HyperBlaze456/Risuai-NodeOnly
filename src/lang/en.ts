@@ -238,6 +238,12 @@ export const languageEnglish = {
             "Only use the providers in this list, if all the provider is not available, the request will failed. See detail on https://openrouter.ai/docs/guides/routing/provider-selection#allowing-only-specific-providers",
         openRouterProviderIgnore:
             "Ignore the providers in this list, if all the provider is ingored, the request will failed. See detail on https://openrouter.ai/docs/guides/routing/provider-selection#ignoring-providers",
+        openRouterReasoningEffort:
+            "Reasoning effort level sent via OpenRouter's unified `reasoning.effort` parameter. Off disables reasoning controls. Only effective for models that support reasoning.",
+        openRouterReasoningMaxTokens:
+            "Maximum tokens the model may use for reasoning, sent via OpenRouter's `reasoning.max_tokens` parameter. Disabled means no explicit budget is sent. Some providers accept either effort or max_tokens but not both.",
+        openRouterReasoningExclude:
+            "When enabled, the reasoning trace is generated but not returned in the response (`reasoning.exclude`).",
         additionalPrompt:
             "Text that gets appended to the Main Prompt when Prompt Preprocess is enabled. Default is 'The assistant must act as {{char}}. user is {{user}}.' This helps set up basic roleplay context.",
         hideAllImagesDesc: "Hides bot icons, bot image assets, and RisuRealm cover images.",
@@ -1137,6 +1143,9 @@ export const languageEnglish = {
     maxThoughtTagDepth: "Max Thought Tag Depth",
     openRouterFallback: "Use Fallback",
     openRouterMiddleOut: "Use Middle Out",
+    openRouterReasoningEffort: "Reasoning Effort",
+    openRouterReasoningMaxTokens: "Reasoning Max Tokens",
+    openRouterReasoningExclude: "Exclude Reasoning From Response",
     openRouterProviderOrder: "Provider Preference Order",
     openRouterProviderOnly: "Allowed Providers",
     openRouterProviderIgnore: "Ignored Providers",

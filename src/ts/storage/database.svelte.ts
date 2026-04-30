@@ -436,6 +436,9 @@ export function setDatabase(data:Database){
     data.promptSettings.maxThoughtTagDepth ??= -1
     data.openrouterFallback ??= true
     data.openrouterMiddleOut ??= false
+    data.openrouterReasoningEffort ??= 'off'
+    data.openrouterReasoningMaxTokens ??= -1000
+    data.openrouterReasoningExclude ??= false
     data.memoryLimitThickness ??= 1
     data.modules ??= []
     data.enabledModules ??= []
@@ -1024,6 +1027,9 @@ export interface Database{
     nanogptSubscriptionState:string
     nanogptUseSubscriptionEndpoint:boolean
     openrouterFallback:boolean
+    openrouterReasoningEffort: 'off' | 'low' | 'medium' | 'high'
+    openrouterReasoningMaxTokens: number
+    openrouterReasoningExclude: boolean
     selectedPersona:number
     personas:{
         personaPrompt:string

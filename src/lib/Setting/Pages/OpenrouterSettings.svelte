@@ -2,12 +2,21 @@
     import { language } from "src/lang";
     import Accordion from "src/lib/UI/Accordion.svelte";
     import Check from "src/lib/UI/GUI/CheckInput.svelte";
-    
+    import SegmentedControl from "src/lib/UI/GUI/SegmentedControl.svelte";
+    import SliderInput from "src/lib/UI/GUI/SliderInput.svelte";
+
     import { DBState } from 'src/ts/stores.svelte';
     import ChatFormatSettings from "./ChatFormatSettings.svelte";
     import OpenrouterProviderList from "src/lib/UI/OpenrouterProviderList.svelte";
     import { PlusIcon, TrashIcon } from "@lucide/svelte";
     import { getOpenRouterProviders } from 'src/ts/model/openrouter'
+
+    const reasoningEffortOptions = [
+        { value: 'off', label: 'Off' },
+        { value: 'low', label: 'Low' },
+        { value: 'medium', label: 'Medium' },
+        { value: 'high', label: 'High' },
+    ]
 </script>
 
 <Accordion name={`OpenRouter ${language.settings}`} styled>
@@ -20,6 +29,29 @@
     <div class="flex items-center mb-4">
         <Check bind:check={DBState.db.useInstructPrompt} name={language.useInstructPrompt}/>
     </div>
+
+    <Accordion name={language.openRouterReasoningEffort} help="openRouterReasoningEffort" styled>
+        <SegmentedControl
+            bind:value={DBState.db.openrouterReasoningEffort}
+            options={reasoningEffortOptions}
+            size="sm"
+        />
+
+        <span class="text-textcolor mt-4 block">{language.openRouterReasoningMaxTokens}</span>
+        <SliderInput
+            bind:value={DBState.db.openrouterReasoningMaxTokens}
+            min={0}
+            max={64000}
+            step={200}
+            disableable={true}
+            marginBottom={true}
+        />
+
+        <div class="flex items-center mb-4">
+            <Check bind:check={DBState.db.openrouterReasoningExclude} name={language.openRouterReasoningExclude}/>
+        </div>
+    </Accordion>
+
     {#await getOpenRouterProviders()}
         <Accordion name={language.openRouterProviderOrder} help="openRouterProviderOrder" styled>
             <p>{language.loading}...</p>
