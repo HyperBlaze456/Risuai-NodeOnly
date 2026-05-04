@@ -20,6 +20,7 @@
     import { stopTTS } from "src/ts/process/tts";
     import MainMenu from '../UI/MainMenu.svelte';
     import AssetInput from './AssetInput.svelte';
+    import { scrollWithinContainer } from './scrollWithin';
     import { aiLawApplies, chatFoldedState, chatFoldedStateMessageIndex, downloadFile } from 'src/ts/globalApi.svelte';
     import { runTrigger } from 'src/ts/process/triggers';
     import { v4 } from 'uuid';
@@ -74,7 +75,7 @@
     }
 
     function navigateMessage(direction: 'prev' | 'next') {
-        const container = document.querySelector('.default-chat-screen')
+        const container = document.querySelector('.default-chat-screen') as HTMLElement | null
         if (!container) return
         const messages = Array.from(container.querySelectorAll('[data-chat-index]'))
             .map(el => ({ el: el as HTMLElement, idx: parseInt(el.getAttribute('data-chat-index')!) }))
@@ -100,24 +101,24 @@
             const topVisible = currentRect.top >= containerRect.top - threshold
             if (!topVisible) {
                 // Current message top is hidden → scroll to its start
-                current.el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                scrollWithinContainer(current.el, container, { block: 'start', behavior: 'smooth' })
             } else {
                 // Already at top → go to previous message start
                 const prev = messages.find(m => m.idx === current.idx - 1)
                 if (prev) {
-                    prev.el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                    scrollWithinContainer(prev.el, container, { block: 'start', behavior: 'smooth' })
                 }
             }
         } else {
             const bottomVisible = currentRect.bottom <= containerRect.bottom + threshold
             if (!bottomVisible) {
                 // Current message bottom is hidden → scroll to its end
-                current.el.scrollIntoView({ behavior: 'smooth', block: 'end' })
+                scrollWithinContainer(current.el, container, { block: 'end', behavior: 'smooth' })
             } else {
                 // Already see the end → go to next message start
                 const next = messages.find(m => m.idx === current.idx + 1)
                 if (next) {
-                    next.el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                    scrollWithinContainer(next.el, container, { block: 'start', behavior: 'smooth' })
                 }
             }
         }
@@ -651,7 +652,11 @@
             <span>{language.selectChatToView}</span>
         </div>
     {:else}
-        <div class="h-full w-full flex flex-col-reverse overflow-y-auto relative default-chat-screen" class:nodeonly-standard={DBState.db.theme === ''} onscroll={(e) => {
+        <div class="h-full w-full flex flex-col-reverse overflow-y-auto relative default-chat-screen"
+            class:nodeonly-standard={DBState.db.theme === ''}
+            class:no-chat-width-wide={DBState.db.theme === '' && DBState.db.nodeOnlyStandardChatWidth === 'wide'}
+            class:no-chat-width-full={DBState.db.theme === '' && DBState.db.nodeOnlyStandardChatWidth === 'full'}
+            onscroll={(e) => {
             if (DBState.db.useNodeOnlyScrollButton) {
                 showScrollNav = true
                 if (scrollNavTimer) clearTimeout(scrollNavTimer)
