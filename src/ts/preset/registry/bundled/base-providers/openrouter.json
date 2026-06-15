@@ -226,6 +226,10 @@
         {
           "value": "high",
           "label": "High"
+        },
+        {
+          "value": "xhigh",
+          "label": "Extra High"
         }
       ],
       "mapsTo": {
@@ -433,7 +437,7 @@
       },
       {
         "key": "reasoning_effort",
-        "widget": "select",
+        "widget": "combobox",
         "visibility": "advanced",
         "group": "reasoning",
         "order": 1

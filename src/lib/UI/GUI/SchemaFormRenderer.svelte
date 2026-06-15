@@ -5,9 +5,11 @@
         RegistryUiField,
         RegistryUiGroup,
         RegistryUiSchema,
+        RegistryWidget,
         UiVisibility,
     } from "src/ts/preset/types";
     import { localizeGroupLabel } from "src/ts/preset/registry/i18n";
+    import { language } from "src/lang";
     import SchemaFieldRenderer from "./SchemaFieldRenderer.svelte";
 
     interface Props {
@@ -25,6 +27,9 @@
     // `default` for. Idempotent — only writes when the key is still undefined.
     $effect(() => {
         for (const field of schema) {
+            // Tolerate null/undefined elements from a malformed/persisted snapshot
+            // so a single bad entry can't crash rendering (reading `.key` of null).
+            if (!field) continue;
             if (userValues[field.key] === undefined && field.default !== undefined) {
                 userValues[field.key] = field.default;
             }
@@ -33,14 +38,45 @@
 
     type RenderEntry = { schemaField: RegistryFieldSchema; uiField: RegistryUiField };
 
+    // Default widget for a schema field when its uiField is missing (degenerate
+    // snapshot fallback below). Auth fields ignore this — SchemaFieldRenderer
+    // routes `mapsTo.target === 'auth'` to the credential picker regardless.
+    function fieldToWidget(f: RegistryFieldSchema): RegistryWidget {
+        if (f.secret) return 'secret';
+        if (f.enum && f.enum.length > 0) return 'select';
+        switch (f.type) {
+            case 'number':
+            case 'integer': return 'number-input';
+            case 'boolean': return 'toggle';
+            case 'json': return 'json';
+            case 'stringArray': return 'string-array';
+            case 'keyValue': return 'key-value';
+            default: return 'text';
+        }
+    }
+
     function visibleEntries(): RenderEntry[] {
         const out: RenderEntry[] = [];
         for (const uiField of uiSchema.fields) {
+            // Tolerate null/undefined elements from a malformed/persisted snapshot
+            // so a single bad entry can't crash rendering (reading `.visibility` of null).
+            if (!uiField) continue;
             if (uiField.visibility !== visibility) continue;
             if (!evalShowIf(uiField)) continue;
-            const schemaField = schema.find((f) => f.key === uiField.key);
+            const schemaField = schema.find((f) => f?.key === uiField.key);
             if (!schemaField) continue;
             out.push({ schemaField, uiField });
+        }
+        // Degenerate-snapshot fallback: schema fields exist but uiSchema carries no
+        // usable field, which would render a blank form and hide the API key (see
+        // heal-on-load in dbDefaults). Surface every schema field with a default
+        // widget, all under the 'basic' tab so nothing is lost. Gated on an empty
+        // uiSchema so healthy/partial snapshots are never touched.
+        if (visibility === 'basic' && !uiSchema.fields.some(Boolean)) {
+            for (const f of schema) {
+                if (!f) continue;
+                out.push({ schemaField: f, uiField: { key: f.key, widget: fieldToWidget(f), visibility: 'basic' } });
+            }
         }
         return out;
     }
@@ -57,7 +93,10 @@
     const entries = $derived(visibleEntries());
 
     const groupedRendered = $derived.by(() => {
-        const groupOrder = [...uiSchema.groups]
+        // Tolerate null/undefined group elements from a malformed/persisted
+        // snapshot so a bad entry can't crash the sort (reading `.order` of null).
+        const groupOrder = uiSchema.groups
+            .filter(Boolean)
             .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
 
         // entries grouped by group id (or '' for un-grouped)
@@ -88,7 +127,14 @@
 </script>
 
 {#if groupedRendered.length === 0}
-    <p class="text-textcolor2 text-sm py-4">표시할 항목이 없습니다.</p>
+    {#if visibility === 'basic' && !schema.some(Boolean)}
+        <!-- Fully degenerate snapshot (no schema fields to even fall back to) that
+             heal couldn't repair. Don't dead-end on a blank/"no items" form —
+             point the user at re-download / replace. -->
+        <p class="text-textcolor2 text-sm py-4">{language.modelPresetSnapshotEmpty}</p>
+    {:else}
+        <p class="text-textcolor2 text-sm py-4">표시할 항목이 없습니다.</p>
+    {/if}
 {:else}
     <div class="flex flex-col gap-6">
         {#each groupedRendered as group}

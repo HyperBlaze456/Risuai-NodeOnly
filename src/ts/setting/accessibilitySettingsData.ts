@@ -41,11 +41,21 @@ export const accessibilitySettingsItems: SettingItem[] = [
         helpKey: 'sendKeyMobile',
         options: {
             selectOptions: [
-                { value: 'button', labelKey: 'sendKeyButton' },
                 { value: 'enter', labelKey: 'sendKeyEnter' },
+                { value: 'ctrl-enter', labelKey: 'sendKeyCtrlEnter' },
+                { value: 'shift-enter', labelKey: 'sendKeyShiftEnter' },
+                { value: 'button', labelKey: 'sendKeyButton' },
             ],
         },
         keywords: ['send', 'enter', 'keyboard', 'submit', 'mobile']
+    },
+    {
+        id: 'acc.fixedChatTextarea',
+        type: 'check',
+        labelKey: 'fixedChatTextarea',
+        bindKey: 'fixedChatTextarea',
+        helpKey: 'fixedChatTextarea',
+        keywords: ['fixed', 'chat', 'textarea', 'input']
     },
     {
         id: 'acc.clickToEdit',
@@ -70,6 +80,14 @@ export const accessibilitySettingsItems: SettingItem[] = [
         bindKey: 'longPressToPopupEditor',
         helpKey: 'longPressToPopupEditor',
         keywords: ['long', 'press', 'popup', 'editor']
+    },
+    {
+        id: 'acc.showInputActionBar',
+        type: 'check',
+        labelKey: 'showInputActionBar',
+        bindKey: 'showInputActionBar',
+        helpKey: 'showInputActionBar',
+        keywords: ['input', 'action', 'bar', 'toolbar', 'copy', 'reset', 'expand', 'editor']
     },
     {
         id: 'acc.enableDragPartialEdit',
@@ -195,6 +213,24 @@ export const accessibilitySettingsItems: SettingItem[] = [
         }
     },
     {
+        id: 'acc.chatLoadInitialPages',
+        type: 'number',
+        labelKey: 'chatLoadInitialPages',
+        bindKey: 'chatLoadInitialPages',
+        helpKey: 'chatLoadInitialPages',
+        options: { min: 1 },
+        keywords: ['chat', 'load', 'initial', 'pages', 'scroll', 'message', 'count'],
+    },
+    {
+        id: 'acc.chatLoadAdditionalPages',
+        type: 'number',
+        labelKey: 'chatLoadAdditionalPages',
+        bindKey: 'chatLoadAdditionalPages',
+        helpKey: 'chatLoadAdditionalPages',
+        options: { min: 1 },
+        keywords: ['chat', 'load', 'additional', 'pages', 'scroll', 'message', 'count'],
+    },
+    {
         id: 'acc.createFolderOnBranch',
         type: 'check',
         labelKey: 'createFolderOnBranch',
@@ -209,6 +245,13 @@ export const accessibilitySettingsItems: SettingItem[] = [
         bindKey: 'hamburgerButtonBottom',
         helpKey: 'hamburgerButtonBottom',
         keywords: ['hamburger', 'button', 'bottom', 'menu', 'sidebar', 'accessibility'],
+    },
+    {
+        id: 'acc.moveInsteadOfCopyOnCMPConvert',
+        type: 'check',
+        labelKey: 'moveInsteadOfCopyOnCMPConvert',
+        bindKey: 'moveInsteadOfCopyOnCMPConvert',
+        keywords: ['move', 'instead', 'of', 'copy', 'on', 'CMP', 'convert'],
     },
     {
         id: 'acc.hideLeftBarCollapseButton',
@@ -232,6 +275,38 @@ export const accessibilitySettingsItems: SettingItem[] = [
             ],
         },
         keywords: ['scroll', 'button', 'navigate', 'message'],
+    },
+    {
+        id: 'acc.modelModeLock',
+        type: 'radio',
+        labelKey: 'modelModeLockLabel',
+        bindKey: 'nodeOnlyModelModeLock',
+        helpKey: 'modelModeLock',
+        options: {
+            selectOptions: [
+                { value: 'legacy', labelKey: 'modelModeLockLegacy', descriptionKey: 'modelModeLockLegacyDesc' },
+                { value: 'preset', labelKey: 'modelModeLockPreset', descriptionKey: 'modelModeLockPresetDesc' },
+                { value: 'none', labelKey: 'modelModeLockNone', descriptionKey: 'modelModeLockNoneDesc' },
+            ],
+        },
+        keywords: ['model', 'mode', 'legacy', 'preset', 'binding', 'lock', 'sidebar'],
+    },
+    {
+        id: 'acc.newChatModelMode',
+        type: 'select',
+        labelKey: 'newChatModelModeLabel',
+        helpKey: 'newChatModelMode',
+        condition: (ctx) => (ctx.db.nodeOnlyModelModeLock ?? 'none') === 'none',
+        // Backed by the existing boolean useModelPresetByDefault (preset=true).
+        getValue: (db) => (db.useModelPresetByDefault ? 'preset' : 'legacy'),
+        setValue: (db, val) => { db.useModelPresetByDefault = val === 'preset'; },
+        options: {
+            selectOptions: [
+                { value: 'legacy', labelKey: 'modelModeLegacy' },
+                { value: 'preset', labelKey: 'modelModePreset' },
+            ],
+        },
+        keywords: ['model', 'mode', 'new', 'chat', 'default', 'legacy', 'preset'],
     },
     {
         id: 'acc.showModelInSidebar',
@@ -291,10 +366,12 @@ export const accessibilityEditingItems = pick([
     'acc.confirmReroll',
     'acc.sendKeyPC',
     'acc.sendKeyMobile',
+    'acc.fixedChatTextarea',
     'acc.clickToEdit',
     'acc.enableBlockPartialEdit',
     'acc.enableDragPartialEdit',
     'acc.longPressToPopupEditor',
+    'acc.showInputActionBar',
 ]);
 
 export const accessibilityScrollItems = pick([
@@ -302,9 +379,13 @@ export const accessibilityScrollItems = pick([
     'acc.alwaysScrollToNewMessage',
     'acc.newMessageButtonStyle',
     'acc.nodeOnlyScrollButtonType',
+    'acc.chatLoadInitialPages',
+    'acc.chatLoadAdditionalPages',
 ]);
 
 export const accessibilitySidebarItems = pick([
+    'acc.modelModeLock',
+    'acc.newChatModelMode',
     'acc.showMenuChatList',
     'acc.showMenuHypaMemoryModal',
     'acc.sideMenuRerollButton',
@@ -326,4 +407,5 @@ export const accessibilityOtherItems = pick([
     'acc.showTranslationLoading',
     'acc.disableMobileDragDrop',
     'acc.disableToggleBinding',
+    'acc.moveInsteadOfCopyOnCMPConvert',
 ]);
