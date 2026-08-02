@@ -46,7 +46,7 @@
                 },
                 {
                     "name": "module",
-                    "accept": [".risum"]
+                    "accept": [".risum", ".module.charx"]
                 }
             ]
         }
@@ -55,7 +55,7 @@
         {
             "action": "/",
             "accept": {
-                "application/octet-stream": [".charx", ".risup", ".risum"]
+                "application/octet-stream": [".charx", ".module.charx", ".risup", ".risum"]
             }
         }
     ]

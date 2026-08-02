@@ -15,7 +15,7 @@ import { reencodeImage } from "./process/files/inlays"
 import { PngChunk } from "./pngChunk"
 import type { OnnxModelFiles } from "./process/transformers"
 import { CharXImporter, CharXSkippableChecker, CharXWriter } from "./process/processzip"
-import { exportModuleLegacy, readModule, type RisuModule } from "./process/modules"
+import { exportModuleLegacy, importCharXModule, readModule, type RisuModule } from "./process/modules"
 
 
 const EXTERNAL_HUB_URL = 'https://sv.risuai.xyz';
@@ -453,12 +453,17 @@ export async function characterURLImport() {
             return
         }
         const module = new Uint8Array(await data.arrayBuffer())
-        const md = await readModule(Buffer.from(module))
-        md.id = v4()
-        const db = getDatabase()
-        db.modules.push(md)
-        notifySuccess(language.successImport)
-        openSettings(SettingsRoute.Module)
+        if(module[0] === 111){
+            const md = await readModule(Buffer.from(module))
+            md.id = v4()
+            const db = getDatabase()
+            db.modules.push(md)
+            notifySuccess(language.successImport)
+            openSettings(SettingsRoute.Module)
+        }
+        else if(await importCharXModule('shared.module.charx', module)){
+            openSettings(SettingsRoute.Module)
+        }
     }
     if(hash.startsWith('#share_preset')){
         const data = await fetch("/sw/share/preset")
@@ -490,14 +495,21 @@ export async function characterURLImport() {
     }
 
     async function importFile(name:string, data:Uint8Array) {
-        if(name.endsWith('.charx') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png')){
+        const lowerName = name.toLowerCase()
+        if(lowerName.endsWith('.module.charx')){
+            if(await importCharXModule(name, data)){
+                openSettings(SettingsRoute.Module)
+            }
+            return
+        }
+        if(lowerName.endsWith('.charx') || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') || lowerName.endsWith('.png')){
             await importCharacterProcess({
                 name: name,
                 data: data
             })
             return
         }
-        if(name.endsWith('.risupreset') || name.endsWith('.risup')){
+        if(lowerName.endsWith('.risupreset') || lowerName.endsWith('.risup')){
             await importPreset({
                 name: name,
                 data: data
@@ -506,7 +518,7 @@ export async function characterURLImport() {
             notifySuccess(language.successImport)
             return
         }
-        if(name.endsWith('risum')){
+        if(lowerName.endsWith('.risum')){
             const md = await readModule(Buffer.from(data))
             md.id = v4()
             const db = getDatabase()

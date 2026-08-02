@@ -48,6 +48,10 @@ self.addEventListener('fetch', (event) => {
                         const module = formData.get('module')
                         if(character){
                             const buf = await character.arrayBuffer()
+                            if(character.name?.toLowerCase().endsWith('.module.charx')){
+                                await registerCache(`/sw/share/module`, buf, true)
+                                return Response.redirect("/#share_module", 303)
+                            }
                             await registerCache(`/sw/share/character`, buf, true)
                             return Response.redirect("/#share_character", 303)
                         }

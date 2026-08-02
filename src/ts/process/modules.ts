@@ -253,35 +253,40 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
     return module
 }
 
+export async function importCharXModule(name:string, data:Uint8Array):Promise<boolean> {
+    try {
+        const char = await importCharacterProcess({
+            name,
+            data,
+            returnCharacter: true
+        })
+        if(!char || typeof char === 'number'){
+            alertError(language.errors.noData)
+            return false
+        }
+        const db = getDatabase()
+        db.modules.push(convertCharacterToModule(char))
+        notifySuccess(language.successImport)
+        return true
+    } catch (error) {
+        console.error(error)
+        alertError(language.errors.noData)
+        return false
+    }
+}
+
 export async function importModule(){
     const f = await selectSingleFile(['json', 'lorebook', 'risum', 'charx'])
     if(!f){
         return
     }
     let fileData = f.data
-    const db = getDatabase()
-    if(f.name.endsWith('.charx')){
-        try {
-            const buf = Buffer.from(fileData)
-            const char = await importCharacterProcess({
-                name: f.name,
-                data: buf,
-                returnCharacter: true
-            })
-            if(!char || typeof char === 'number'){
-                alertError(language.errors.noData)
-                return
-            }
-            const module = convertCharacterToModule(char)
-            db.modules.push(module)
-        } catch (error) {
-            console.error(error)
-            alertError(language.errors.noData)
-        }
-        notifySuccess(language.successImport)
+    if(f.name.toLowerCase().endsWith('.charx')){
+        await importCharXModule(f.name, fileData)
         return
     }
-    if(f.name.endsWith('.risum')){
+    const db = getDatabase()
+    if(f.name.toLowerCase().endsWith('.risum')){
         try {
             const buf = Buffer.from(fileData)
             const module = await readModule(buf)
