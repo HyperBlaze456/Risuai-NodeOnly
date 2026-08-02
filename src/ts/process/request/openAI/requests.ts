@@ -4,7 +4,7 @@ import { getDatabase } from "src/ts/storage/database.svelte"
 import { LLMFlags, LLMFormat } from "src/ts/model/modellist"
 import { strongBan, tokenizeNum } from "src/ts/tokenizer"
 import { getFreeOpenRouterModels } from "src/ts/model/openrouter"
-import { addFetchLog, fetchNative, globalFetch, textifyReadableStream } from "src/ts/globalApi.svelte"
+import { fetchNative, globalFetch, textifyReadableStream } from "src/ts/globalApi.svelte"
 import { isLocalNetworkUrl } from "src/ts/network/localNetwork"
 import { simplifySchema } from "src/ts/util"
 
@@ -310,7 +310,7 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
         }
     
         const mistralUrl = arg.customURL ?? "https://api.mistral.ai/v1/chat/completions"
-        const res = await globalFetch(mistralUrl, { ...targs, ...getLocalNetworkRequestOptions(mistralUrl) })
+        const res = await globalFetch(mistralUrl, { ...targs, ...getLocalNetworkRequestOptions(mistralUrl), logCategory: 'llm', logSource: 'main', logModel: arg.modelInfo?.id })
 
         const dat = res.data as any
         if(res.ok){
@@ -588,6 +588,9 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
             signal: arg.abortSignal,
             chatId: arg.chatId,
             interceptor: 'openai_streaming',
+            logCategory: 'llm',
+            logSource: 'main',
+            logModel: arg.modelInfo?.id,
             ...getLocalNetworkRequestOptions(replacerURL, arg.forceLocalNetwork),
         })
 
@@ -604,14 +607,6 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
                 result: await textifyReadableStream(da.body)
             }
         }
-
-        addFetchLog({
-            body: body,
-            response: "Streaming",
-            success: true,
-            url: replacerURL,
-            status: da.status,
-        })
 
         const transtream = getTranStream(arg)
 
@@ -646,6 +641,9 @@ async function requestHTTPOpenAI(replacerURL:string,body:any, headers:Record<str
     
     const db = getDatabase()
     const res = await globalFetch(replacerURL, {
+        logCategory: 'llm',
+        logSource: 'main',
+        logModel: arg.modelInfo?.id,
         body: body,
         headers: headers,
         abortSignal: arg.abortSignal,
@@ -906,6 +904,9 @@ export async function requestOpenAILegacyInstruct(arg:RequestDataArgumentExtende
 
     const completionsUrl = arg.customURL ?? "https://api.openai.com/v1/completions"
     const response = await globalFetch(completionsUrl, {
+        logCategory: 'llm',
+        logSource: 'main',
+        logModel: 'gpt-3.5-turbo-instruct',
         body: {
             model: "gpt-3.5-turbo-instruct",
             prompt: prompt,
@@ -1100,6 +1101,9 @@ export async function requestOpenAIResponseAPI(arg:RequestDataArgumentExtended):
     }
 
     const response = await globalFetch(requestURL, {
+        logCategory: 'llm',
+        logSource: 'main',
+        logModel: arg.modelInfo?.id,
         body: body,
         headers: headers,
         chatId: arg.chatId,
@@ -1389,6 +1393,9 @@ function wrapToolStream(
                         do {
                             attempt++
                             resRec = await fetchNative(replacerURL, {
+                                logCategory: 'llm',
+                                logSource: 'sub',
+                                logModel: arg.modelInfo?.id,
                                 body: JSON.stringify(body),
                                 method: "POST",
                                 headers: headers,
@@ -1399,14 +1406,6 @@ function wrapToolStream(
                             })
                             
                             if(resRec.status == 200 && resRec.headers.get('Content-Type').includes('text/event-stream')) {
-                                addFetchLog({
-                                    body: body,
-                                    response: "Streaming",
-                                    success: true,
-                                    url: replacerURL,
-                                    status: resRec.status,
-                                })
-
                                 errorFlag = false
                                 break
                             }     
