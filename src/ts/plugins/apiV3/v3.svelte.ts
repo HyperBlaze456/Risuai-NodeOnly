@@ -1437,8 +1437,12 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             oldApis.safeLocalStorage.clear()
             clearOwners('local')
         },
-        _keySafeLocalStorage: oldApis.safeLocalStorage.key,
+        //bound call: SafeLocalStorage.key uses `this`
+        _keySafeLocalStorage: (index: number) => oldApis.safeLocalStorage.key(index),
         _keysSafeLocalStorage: oldApis.safeLocalStorage.keys,
+        _lengthSafeLocalStorage: () => {
+            return oldApis.safeLocalStorage.length
+        },
         searchTranslationCache: async (partialKey: string) => {
             return searchLLMCache(partialKey)
         },
@@ -1463,6 +1467,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
                     'clear': '_clearSafeLocalStorage',
                     'key': '_keySafeLocalStorage',
                     'keys': '_keysSafeLocalStorage',
+                    'length': '_lengthSafeLocalStorage',
                 }
             }
         },
