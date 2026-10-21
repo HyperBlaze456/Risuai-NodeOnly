@@ -1282,7 +1282,6 @@ export interface Database{
     personas:RisuPersona[]
     /** User-defined groups for organizing personas. */
     personaFolders?:PromptPresetFolder[]
-    personaNote:boolean
     assetWidth:number
     animationSpeed:number
     botSettingAtStart:false

@@ -1242,7 +1242,7 @@ export const languageSpanish = {
     "claude1HourCaching": "Caché de Claude de 1 Hora",
     "folderNameInput": "Por favor ingrese el nuevo nombre de la carpeta",
     "folderRemoveLengthError": "Para eliminar una carpeta, no debe contener ninguna entrada.",
-    "personaNote": "Nota de Persona",
+    "personaNotePlaceholder": "Introduce aquí un identificador único para esta Persona. Ejemplo: \"Persona de cazador\"",
     "personaSearch": "Buscar por nombre o nota",
     "personaManage": "Gestionar personas",
     "folderUncategorized": "Sin categoría",

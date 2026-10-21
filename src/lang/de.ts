@@ -1242,7 +1242,7 @@ export const languageGerman = {
     "claude1HourCaching": "Claude 1 Stunde Caching",
     "folderNameInput": "Bitte geben Sie den neuen Ordnernamen ein",
     "folderRemoveLengthError": "Um einen Ordner zu entfernen, darf er keine Einträge enthalten.",
-    "personaNote": "Persona-Notiz",
+    "personaNotePlaceholder": "Geben Sie hier eine eindeutige Kennung für diese Persona ein. Beispiel: „Jäger-Persona“",
     "personaSearch": "Nach Name oder Notiz suchen",
     "personaManage": "Personas verwalten",
     "folderUncategorized": "Nicht kategorisiert",

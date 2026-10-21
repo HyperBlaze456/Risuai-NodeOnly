@@ -1242,7 +1242,7 @@ export const languageChinese = {
     "claude1HourCaching": "Claude 1 小时缓存",
     "folderNameInput": "请输入新文件夹名称",
     "folderRemoveLengthError": "要删除文件夹，它必须不包含任何条目。",
-    "personaNote": "用户备注",
+    "personaNotePlaceholder": "在此输入用于区分此用户信息的唯一标识。例如：“猎人”",
     "personaSearch": "按名称或备注搜索",
     "personaManage": "管理用户角色",
     "folderUncategorized": "未分类",
