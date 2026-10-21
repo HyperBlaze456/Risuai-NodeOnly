@@ -302,9 +302,12 @@
         } catch (error) {
             //retry
             if(tries > 2){
-
                 const err = error as Error
-                alertError(`Error while parsing chat message: ${translated}, ${err.message}, ${err.stack}`)
+                const wrapped = new Error(`Error while parsing chat message: ${err?.message ?? error}`)
+                if(error instanceof Error){
+                    wrapped.stack = error.stack
+                }
+                alertError(wrapped)
                 lastParsedQueue = hasRenderableResult(data) ? data : lastParsed
                 return lastParsedQueue
             }
