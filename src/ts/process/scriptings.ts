@@ -85,7 +85,7 @@ export async function runScripted(code:string, arg:{
         await ensureLuaFactory()
     }
     let ScriptingEngineState = await getOrCreateEngineState(mode, type);
-    
+
     return await ScriptingEngineState.mutex.runExclusive(async () => {
         ScriptingEngineState.moduleId = arg.moduleId
         ScriptingEngineState.chat = chat
@@ -1131,6 +1131,13 @@ export async function runScripted(code:string, arg:{
                         }
                         break
                     }
+                    case 'onFormSubmit':{
+                        const func = luaEngine.global.get('onFormSubmit')
+                        if(func){
+                            res = await func(accessKey, data, JSON.stringify(meta))
+                        }
+                        break
+                    }
                     case 'editRequest':
                     case 'editDisplay':
                     case 'editInput':
@@ -1500,7 +1507,9 @@ export async function runLuaEditTrigger<T extends string|OpenAIChat[]>(char:char
     }
 }
 
-export async function runLuaButtonTrigger(char:character|simpleCharacterArgument, data:string):Promise<any>{
+export async function runLuaInteractionTrigger(type: 'button'|'form', char: character|simpleCharacterArgument, triggerKey: string, meta?: object): Promise<any> {
+    const mode = type === 'button' ? 'onButtonClick' : 'onFormSubmit'
+
     let runResult
     try {
         const triggers = char.triggerscript.map<triggerscript>((v) => ({
@@ -1511,10 +1520,11 @@ export async function runLuaButtonTrigger(char:character|simpleCharacterArgument
         for(let trigger of triggers){
             if(trigger?.effect?.[0]?.type === 'triggerlua'){
                 runResult = await runScripted(trigger.effect[0].code, {
-                    char: char,
+                    char,
+                    data: triggerKey,
                     lowLevelAccess: trigger.lowLevelAccess,
-                    mode: 'onButtonClick',
-                    data: data,
+                    meta,
+                    mode,
                     moduleId: trigger.moduleId,
                 })
             }
