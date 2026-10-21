@@ -201,7 +201,7 @@ describe('plugin storage cold storage migration (upstream cad8595a)', () => {
     })
   })
 
-  test('keeps unreadable keys under _coldplugin instead of dropping them', async () => {
+  test('records unreadable keys outside the plugin key space instead of dropping them', async () => {
     const srv = await spawnServer()
     servers.push(srv)
     const client = await createClient(srv.port, srv.password)
@@ -219,9 +219,12 @@ describe('plugin storage cold storage migration (upstream cad8595a)', () => {
     expect(result.ok).toBe(true)
 
     const { raw } = normalizeBackup(await client.exportBackup())
-    expect(raw.pluginCustomStorage).toEqual({
-      'ltm/memory': 'restored',
-      _coldplugin: { 'ltm/lost': ID_MISSING },
-    })
+    expect(raw.pluginCustomStorage).toEqual({ 'ltm/memory': 'restored' })
+    // The breadcrumb travels with the backup, but as a NodeOnly field: kept
+    // under _coldplugin it would reach plugins as a key and upstream as a
+    // legacy map.
+    expect(raw.nodeOnlyPluginStorageRecovery).toEqual([
+      expect.objectContaining({ source: 'database', legacyFailed: { 'ltm/lost': ID_MISSING } }),
+    ])
   })
 })

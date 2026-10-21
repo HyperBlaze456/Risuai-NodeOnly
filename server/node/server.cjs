@@ -37,6 +37,7 @@ const { decodeRisuSave, encodeRisuSaveLegacy, calculateHash, normalizeJSON, norm
 const { createPatchHashCache, decodePointerSegment } = require('./patch-hash-cache.cjs');
 const { clonePatchSnapshot } = require('./patch-selective-clone.cjs');
 const pluginStorage = require('./plugin-storage-store.cjs');
+const upstreamPluginStorage = require('./upstream-plugin-storage.cjs');
 const { createAssetManifestStore } = require('./assetManifestStore.cjs');
 const {
     stripAssetManifests,
@@ -549,15 +550,9 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
     // Same one-time path for upstream's cold-storage-backed plugin storage.
     // Must run before the kv split below so the restored values move with it.
     const coldPluginResult = restoreColdPluginStorageInDb(dbObj);
-    if (coldPluginResult.restored > 0 || coldPluginResult.failed > 0) needsPersist = true;
-    if (coldPluginResult.restored > 0) {
-        logger.info(`[ColdStorage] Restored ${coldPluginResult.restored} plugin storage key(s) from cold storage`);
-    }
-    if (coldPluginResult.failed > 0) {
-        logger.error(`[ColdStorage] ${coldPluginResult.failed} plugin storage key(s) could not be restored and were kept under pluginCustomStorage._coldplugin. Cold storage KV data is preserved.`);
-        for (const key of coldPluginResult.failedKeys) {
-            logger.error(`[ColdStorage]   - "${key}"`);
-        }
+    if (coldPluginResult) {
+        needsPersist = true;
+        logPluginStorageRestore('Restored', coldPluginResult);
     }
 
     // One-time move of pluginCustomStorage into kv (plugin-storage/*). Runs on
@@ -585,6 +580,17 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
         logger.error('[PluginStorage] Migration failed; plugin data stays in database.bin', e);
     }
 
+    let leakedPluginResult = null;
+    try {
+        leakedPluginResult = recoverLeakedPluginStorageKeys(dbObj);
+    } catch (e) {
+        logger.error('[PluginStorage] Recovering upstream plugin storage keys from kv failed; they stay as they are', e);
+    }
+    if (leakedPluginResult) {
+        needsPersist = true;
+        logPluginStorageRestore('Recovered', leakedPluginResult);
+    }
+
     if (needsPersist) {
         try {
             kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy(dbObj)));
@@ -604,6 +610,7 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
     }
     if (migrationResult) {
         migrationResult.coldStorageFailed = coldRestoreResult.failed;
+        migrationResult.pluginStorageColdFailed = (coldPluginResult?.failed || 0) + (leakedPluginResult?.failed || 0);
     }
     return dbObj;
 }
@@ -3154,6 +3161,7 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     // Trigger cold storage migration now so import result includes failure count.
     const dbRaw = kvGet('database/database.bin');
     let coldStorageFailed = 0;
+    let pluginStorageColdFailed = 0;
     if (dbRaw) {
         const migration = {};
         const dbObj = await decodeDatabaseWithPersistentChatIds(dbRaw, {
@@ -3161,6 +3169,7 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
             migrationResult: migration,
         });
         coldStorageFailed = migration.coldStorageFailed || 0;
+        pluginStorageColdFailed = migration.pluginStorageColdFailed || 0;
         await initChatStoreFromDisk(dbObj);
     }
 
@@ -3174,7 +3183,10 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     if (coldStorageFailed > 0) {
         logger.error(`[Backup Import] ${coldStorageFailed} cold storage character(s) could not be restored`);
     }
-    return { assetsRestored, bytesReceived, coldStorageFailed };
+    if (pluginStorageColdFailed > 0) {
+        logger.error(`[Backup Import] ${pluginStorageColdFailed} plugin storage item(s) could not be restored from cold storage`);
+    }
+    return { assetsRestored, bytesReceived, coldStorageFailed, pluginStorageColdFailed };
 }
 
 app.get('/', async (req, res, next) => {
@@ -5556,6 +5568,7 @@ app.post('/api/backup/import', async (req, res, next) => {
                 ok: true,
                 assetsRestored: result.assetsRestored,
                 coldStorageFailed: result.coldStorageFailed,
+                pluginStorageColdFailed: result.pluginStorageColdFailed,
             }) + '\n');
             res.end();
         } else {
@@ -5564,6 +5577,7 @@ app.post('/api/backup/import', async (req, res, next) => {
                 ok: true,
                 assetsRestored: result.assetsRestored,
                 coldStorageFailed: result.coldStorageFailed,
+                pluginStorageColdFailed: result.pluginStorageColdFailed,
             });
         }
     } catch (error) {
@@ -5800,6 +5814,7 @@ app.post('/api/backup/server/restore', async (req, res, next) => {
             ok: true,
             assetsRestored: result.assetsRestored,
             coldStorageFailed: result.coldStorageFailed,
+            pluginStorageColdFailed: result.pluginStorageColdFailed,
         }) + '\n');
         res.end();
     } catch (error) {
@@ -5957,50 +5972,90 @@ function restoreColdStorageCharactersInDb(dbObj) {
     return result;
 }
 
-// Upstream (cad8595a) keeps v3 pluginStorage values in cold storage and leaves
-// only a key -> cold id map in pluginCustomStorage._coldplugin. Fold the
-// values back inline so pluginStorage.migrateFromDb moves them into kv.
-// Keys whose entry is missing or unreadable stay in _coldplugin as recovery
-// breadcrumbs; their cold storage KV entries are never deleted.
-const COLD_PLUGIN_STORAGE_KEY = '_coldplugin';
+// Upstream keeps v3 pluginStorage values in cold storage: cad8595a leaves a
+// key -> cold id map in pluginCustomStorage._coldplugin, and 68b5d032c
+// (v2026.10.210+) a _coldpluginIndex pointer to one index item. Fold both back
+// into plain keys so pluginStorage.migrateFromDb moves them into kv (see
+// upstream-plugin-storage.cjs). Cold storage KV entries are never deleted.
+// What cannot be restored is recorded in nodeOnlyPluginStorageRecovery,
+// outside the plugin key space, so a reserved key never reaches a plugin or
+// an export to upstream, where it would be read as a live pointer.
+const PLUGIN_STORAGE_RECOVERY_KEY = 'nodeOnlyPluginStorageRecovery';
+
+function readColdPluginItem(coldId) {
+    try {
+        const entry = readColdStorageJsonEntry(coldId, { migrateLegacy: true });
+        return entry ? entry.coldData : undefined;
+    } catch (err) {
+        logger.error(`[ColdStorage] plugin storage item ${coldId} could not be read:`, err.message);
+        throw err;
+    }
+}
+
+function appendPluginStorageRecovery(dbObj, record) {
+    const existing = Array.isArray(dbObj[PLUGIN_STORAGE_RECOVERY_KEY]) ? dbObj[PLUGIN_STORAGE_RECOVERY_KEY] : [];
+    dbObj[PLUGIN_STORAGE_RECOVERY_KEY] = [...existing, record];
+}
+
+function logPluginStorageRestore(action, result) {
+    if (result.restored > 0) {
+        logger.info(`[ColdStorage] ${action} ${result.restored} plugin storage key(s) from cold storage`);
+    }
+    if (result.failed > 0) {
+        logger.error(`[ColdStorage] ${result.failed} plugin storage item(s) could not be restored; details are kept in ${PLUGIN_STORAGE_RECOVERY_KEY}. Cold storage KV data is preserved.`);
+    }
+}
 
 function restoreColdPluginStorageInDb(dbObj) {
-    const result = { restored: 0, failed: 0, failedKeys: [] };
     const storage = dbObj?.pluginCustomStorage;
-    if (!storage || typeof storage !== 'object' || Array.isArray(storage)) return result;
-    if (!Object.prototype.hasOwnProperty.call(storage, COLD_PLUGIN_STORAGE_KEY)) return result;
-    const map = storage[COLD_PLUGIN_STORAGE_KEY];
-    if (!map || typeof map !== 'object' || Array.isArray(map)) return result;
+    if (!upstreamPluginStorage.hasReservedKeys(storage)) return null;
+    const resolved = upstreamPluginStorage.resolveUpstreamPluginStorage(storage, {
+        readCold: readColdPluginItem,
+        isPresent: (key) => Object.prototype.hasOwnProperty.call(storage, key),
+        // cad8595a: the cold copy is upstream's live value; an inline key of
+        // the same name is a stale pre-migration leftover.
+        legacyOverridesPresent: true,
+        source: 'database',
+    });
+    for (const key of upstreamPluginStorage.RESERVED_KEYS) delete storage[key];
+    for (const [key, value] of resolved.assign) {
+        // defineProperty keeps a "__proto__" key an own property.
+        Object.defineProperty(storage, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    if (resolved.record) appendPluginStorageRecovery(dbObj, resolved.record);
+    return resolved;
+}
 
-    const remaining = {};
-    for (const key of Object.keys(map)) {
-        const coldId = map[key];
-        let entry = null;
+// Builds that did not know the index layout moved upstream's reserved keys
+// into kv as ordinary plugin keys (the pointer string, and _coldplugin
+// breadcrumbs). Resolve them the same way, once: the values already in kv are
+// live and win over the cold copies.
+function recoverLeakedPluginStorageKeys(dbObj) {
+    const leaked = {};
+    for (const key of upstreamPluginStorage.RESERVED_KEYS) {
+        let value = null;
         try {
-            entry = typeof coldId === 'string' && coldId
-                ? readColdStorageJsonEntry(coldId, { migrateLegacy: true })
-                : null;
+            value = pluginStorage.get(key);
         } catch (err) {
-            logger.error(`[ColdStorage] plugin storage key "${key}" (${coldId}) could not be read:`, err.message);
+            logger.error(`[PluginStorage] Reserved key "${key}" in kv could not be read:`, err.message);
         }
-        if (!entry) {
-            remaining[key] = coldId;
-            result.failed++;
-            result.failedKeys.push(key);
-            continue;
-        }
-        // The cold copy is upstream's live value; an inline key of the same
-        // name is a stale pre-migration leftover.
-        storage[key] = entry.coldData;
-        result.restored++;
+        if (value !== null && value !== undefined) leaked[key] = value;
     }
+    if (Object.keys(leaked).length === 0) return null;
 
-    if (Object.keys(remaining).length > 0) {
-        storage[COLD_PLUGIN_STORAGE_KEY] = remaining;
-    } else {
-        delete storage[COLD_PLUGIN_STORAGE_KEY];
-    }
-    return result;
+    createBackupAndRotate({ force: true });
+    const present = new Set(pluginStorage.list().map((entry) => entry.key));
+    const resolved = upstreamPluginStorage.resolveUpstreamPluginStorage(leaked, {
+        readCold: readColdPluginItem,
+        isPresent: (key) => present.has(key),
+        source: 'leaked-kv',
+    });
+    sqliteDb.transaction(() => {
+        for (const [key, value] of resolved.assign) pluginStorage.set(key, value);
+        for (const key of Object.keys(leaked)) pluginStorage.remove(key);
+    })();
+    if (resolved.record) appendPluginStorageRecovery(dbObj, resolved.record);
+    return resolved;
 }
 
 function isColdStorageChat(chat) {

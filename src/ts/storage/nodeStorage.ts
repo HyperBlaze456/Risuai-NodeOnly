@@ -984,7 +984,7 @@ export class NodeStorage{
     async importBackup(
         file: Blob,
         onProgress?: (loaded: number, total: number) => void
-    ): Promise<{ok: boolean, assetsRestored: number, coldStorageFailed?: number}> {
+    ): Promise<{ok: boolean, assetsRestored: number, coldStorageFailed?: number, pluginStorageColdFailed?: number}> {
         await this.prepareImport(file.size)
         const authHeader = await this.createAuth()
 
@@ -1009,7 +1009,7 @@ export class NodeStorage{
 
             let parsedIndex = 0
             let leftover = ''
-            let result: {ok: boolean, assetsRestored: number, coldStorageFailed?: number} | null = null
+            let result: {ok: boolean, assetsRestored: number, coldStorageFailed?: number, pluginStorageColdFailed?: number} | null = null
             let serverErrorMsg: string | null = null
             let serverErrorCode: string | null = null
 
@@ -1113,7 +1113,7 @@ export class NodeStorage{
     async restoreServerBackup(
         filename: string,
         onProgress?: (bytes: number, totalBytes: number) => void
-    ): Promise<{ok: boolean, assetsRestored: number, coldStorageFailed?: number}> {
+    ): Promise<{ok: boolean, assetsRestored: number, coldStorageFailed?: number, pluginStorageColdFailed?: number}> {
         const da = await this.authFetch('/api/backup/server/restore', {
             method: 'POST',
             headers: {
@@ -1132,7 +1132,7 @@ export class NodeStorage{
         const reader = da.body!.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-        let result: {ok: boolean, assetsRestored: number, coldStorageFailed?: number} | null = null
+        let result: {ok: boolean, assetsRestored: number, coldStorageFailed?: number, pluginStorageColdFailed?: number} | null = null
 
         while (true) {
             const { done, value } = await reader.read()
