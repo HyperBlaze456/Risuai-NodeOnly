@@ -1,5 +1,5 @@
 import { asBuffer } from 'src/ts/util';
-import { getChatVar, getGlobalChatVar, setChatVar } from "../parser/chatVar.svelte";
+import { getChatVar, getChatVarOf, getGlobalChatVar, setChatVar, setChatVarOf } from "../parser/chatVar.svelte";
 import { hasher, type simpleCharacterArgument, risuChatParser } from "../parser/parser.svelte";
 import { LuaEngine, LuaFactory } from "wasmoon";
 import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type character, type triggerscript } from "../storage/database.svelte";
@@ -1507,8 +1507,13 @@ export async function runLuaEditTrigger<T extends string|OpenAIChat[]>(char:char
     }
 }
 
-export async function runLuaInteractionTrigger(type: 'button'|'form', char: character|simpleCharacterArgument, triggerKey: string, meta?: object): Promise<any> {
+export async function runLuaInteractionTrigger(type: 'button'|'form', char: character|simpleCharacterArgument, triggerKey: string, meta?: object, chat: Chat = getCurrentChat()): Promise<any> {
     const mode = type === 'button' ? 'onButtonClick' : 'onFormSubmit'
+    // The caller awaits this while the user can open another chat, so every
+    // script here works on, and keeps its variables in, the chat it started on.
+    const defaultVariables = char.type !== 'simple' ? char.defaultVariables : undefined
+    const getVar = (key:string) => getChatVarOf(chat, key, defaultVariables)
+    const setVar = (key:string, value:string) => setChatVarOf(chat, key, value)
 
     let runResult
     try {
@@ -1521,7 +1526,10 @@ export async function runLuaInteractionTrigger(type: 'button'|'form', char: char
             if(trigger?.effect?.[0]?.type === 'triggerlua'){
                 runResult = await runScripted(trigger.effect[0].code, {
                     char,
+                    chat,
                     data: triggerKey,
+                    getVar,
+                    setVar,
                     lowLevelAccess: trigger.lowLevelAccess,
                     meta,
                     mode,

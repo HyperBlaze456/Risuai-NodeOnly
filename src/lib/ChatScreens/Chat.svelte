@@ -6,6 +6,7 @@
     import { MediaQuery } from "svelte/reactivity"
     import { getModelInfo } from "src/ts/model/modellist"
     import { runLuaInteractionTrigger } from 'src/ts/process/scriptings'
+    import { getTriggerOrigin, setTriggerOriginChat } from 'src/ts/process/triggerOrigin'
     import { risuChatParser } from "src/ts/process/scripts"
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
@@ -19,7 +20,7 @@
     import { alertClear, alertConfirm, alertConfirmMulti, alertInput, alertRequestData, alertWait, notifyInfo, notifySuccess, type AlertAction } from "../../ts/alert"
     import { ParseMarkdown, type CbsConditions, type simpleCharacterArgument } from "../../ts/parser/parser.svelte"
     import { getLLMCache, setLLMCache } from "../../ts/translator/translator"
-    import { getCurrentCharacter, getCurrentChat, setCurrentChat, type MessageGenerationInfo, type StreamingDisplayOptimizationMode } from "../../ts/storage/database.svelte"
+    import { getCurrentCharacter, type MessageGenerationInfo, type StreamingDisplayOptimizationMode } from "../../ts/storage/database.svelte"
     import { selectedCharID } from "../../ts/stores.svelte"
     import { HideIconStore, ReloadGUIPointer, selIdState } from "../../ts/stores.svelte"
     import AutoresizeArea from "../UI/GUI/TextAreaResizable.svelte"
@@ -349,20 +350,20 @@
         const triggerName = origin.getAttribute('risu-trigger')
         const triggerId = origin.getAttribute('risu-id')
         const btnEvent = origin.getAttribute('risu-btn')
+        const triggerOrigin = getTriggerOrigin(currentChar)
 
         const triggerResult =
             triggerName ?
                 await runTrigger(currentChar, 'manual', {
-                    chat: getCurrentChat(),
+                    chat: triggerOrigin.chat,
                     manualName: triggerName,
                     triggerId: triggerId || undefined,
                 }) :
             btnEvent ?
-                await runLuaInteractionTrigger('button', currentChar, btnEvent) :
+                await runLuaInteractionTrigger('button', currentChar, btnEvent, undefined, triggerOrigin.chat) :
             null
 
-        if(triggerResult) {
-            setCurrentChat(triggerResult.chat)
+        if(triggerResult && setTriggerOriginChat(triggerOrigin, triggerResult.chat)) {
             ReloadChatPointer.update((v) => {
                 v[idx] = (v[idx] ?? 0) + 1
                 return v
@@ -410,10 +411,10 @@
             }
         }
 
-        const triggerResult = await runLuaInteractionTrigger('form', currentChar, formEvent, { data })
+        const triggerOrigin = getTriggerOrigin(currentChar)
+        const triggerResult = await runLuaInteractionTrigger('form', currentChar, formEvent, { data }, triggerOrigin.chat)
 
-        if(triggerResult) {
-            setCurrentChat(triggerResult.chat)
+        if(triggerResult && setTriggerOriginChat(triggerOrigin, triggerResult.chat)) {
             ReloadChatPointer.update((v) => {
                 v[idx] = (v[idx] ?? 0) + 1
                 return v
