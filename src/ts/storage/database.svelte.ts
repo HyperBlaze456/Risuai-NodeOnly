@@ -1904,6 +1904,7 @@ export interface character{
         ext: string
     }>
     defaultVariables?:string
+    onboarding?:CharacterOnboarding
     lowLevelAccess?:boolean
     hideChatIcon?:boolean
     lastInteraction?:number
@@ -2343,6 +2344,38 @@ export type { ChatStub } from './chatStub'
 export { isChatStub } from './chatStub'
 
 export type ChatOrStub = Chat | import('./chatStub').ChatStub
+
+export interface OnboardingOption{
+    label:string
+    value:string
+}
+
+export interface OnboardingQuestion{
+    id:string
+    title:string
+    description?:string
+    type:'single'|'multiple'|'text'
+    varName:string
+    required?:boolean
+    options:OnboardingOption[]
+    placeholder?:string
+}
+
+/**
+ * A creator-defined set of choices shown before a chat starts (upstream card
+ * spec, `extensions.risuai.onboarding`). PocketRisu keeps the data through
+ * card import/export but does not show it yet.
+ */
+export interface CharacterOnboarding{
+    enabled:boolean
+    mode:'form'|'html'
+    title?:string
+    description?:string
+    questions:OnboardingQuestion[]
+    html?:string
+    /** Also shows a floating button on the chat screen that opens the onboarding. */
+    floatingButton?:boolean
+}
 
 export interface ChatFolder{
     id:string

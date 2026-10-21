@@ -17,6 +17,7 @@ import type { OnnxModelFiles } from "./process/transformers"
 import { CharXImporter, CharXSkippableChecker, CharXWriter } from "./process/processzip"
 import { exportModuleLegacy, readModule, type RisuModule } from "./process/modules"
 import { filterBlockedRealmCards, isRealmCreatorBlocked } from "./realmBlocking"
+import { normalizeOnboarding } from "./onboarding"
 
 
 const EXTERNAL_HUB_URL = 'https://sv.risuai.xyz';
@@ -983,6 +984,7 @@ async function importCharacterCardSpec<T extends boolean = false>(card:Character
         customModuleToggle: data?.extensions?.risuai?.toggles ?? '',
         moduleNamespace: data?.extensions?.risuai?.moduleNamespace,
         hideChatIcon: data?.extensions?.risuai?.hideChatIcon ?? false,
+        onboarding: normalizeOnboarding(data?.extensions?.risuai?.onboarding),
     }
 
     if(card.spec === 'chara_card_v3'){
@@ -1617,7 +1619,8 @@ export function createBaseV3(char:character){
                     prebuiltAssetStyle: char.prebuiltAssetStyle ?? '',
                     toggles: char.customModuleToggle ?? '',
                     moduleNamespace: char.moduleNamespace,
-                    hideChatIcon: char.hideChatIcon ?? false
+                    hideChatIcon: char.hideChatIcon ?? false,
+                    onboarding: char.onboarding
                 },
                 depth_prompt: char.depth_prompt
             },
