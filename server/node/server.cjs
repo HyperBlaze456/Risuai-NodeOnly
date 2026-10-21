@@ -6031,9 +6031,6 @@ function restoreColdPluginStorageInDb(dbObj) {
     const resolved = upstreamPluginStorage.resolveUpstreamPluginStorage(storage, {
         readCold: readColdPluginItem,
         isPresent: (key) => Object.prototype.hasOwnProperty.call(storage, key),
-        // cad8595a: the cold copy is upstream's live value; an inline key of
-        // the same name is a stale pre-migration leftover.
-        legacyOverridesPresent: true,
         source: 'database',
     });
     for (const key of upstreamPluginStorage.RESERVED_KEYS) delete storage[key];

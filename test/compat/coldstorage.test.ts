@@ -179,8 +179,9 @@ describe('plugin storage cold storage migration (upstream cad8595a)', () => {
     const seed = createSeedBackup({
       pluginCustomStorage: {
         _coldplugin: { 'ltm/memory': ID_A, 'ltm/config': ID_B },
-        // Inline key written before upstream migrated it: the cold copy wins.
-        'ltm/memory': 'stale inline copy',
+        // Inline key written after upstream moved it (an older build, a V2
+        // plugin): newer than the cold copy, as upstream v210 rules.
+        'ltm/memory': 'written after the move',
         // A key upstream never moved stays as is.
         'other/flag': 'kept',
       },
@@ -195,10 +196,13 @@ describe('plugin storage cold storage migration (upstream cad8595a)', () => {
 
     const { raw } = normalizeBackup(await client.exportBackup())
     expect(raw.pluginCustomStorage).toEqual({
-      'ltm/memory': memory,
+      'ltm/memory': 'written after the move',
       'ltm/config': 'config-string',
       'other/flag': 'kept',
     })
+    expect(raw.nodeOnlyPluginStorageRecovery).toEqual([
+      expect.objectContaining({ source: 'database', shadowedLegacyKeys: ['ltm/memory'] }),
+    ])
   })
 
   test('records unreadable keys outside the plugin key space instead of dropping them', async () => {

@@ -127,15 +127,13 @@ describe('resolveUpstreamPluginStorage (unit)', () => {
         expect(r.reads.filter(id => id === LEGACY)).toHaveLength(1)
     })
 
-    test('cad8595a data (no index): the legacy value replaces the stale inline copy only when asked', () => {
-        const storage = { [LEGACY_MAP_KEY]: { memory: LEGACY }, memory: 'stale inline copy' }
-        const overriding = resolve(storage, { [LEGACY]: 'cold value' }, { legacyOverridesPresent: true })
-        expect(Object.fromEntries(overriding.values)).toEqual({ memory: 'cold value' })
-        expect(overriding.record).toBeNull()
-
-        const kvWins = resolve(storage, { [LEGACY]: 'cold value' })
-        expect(kvWins.values.size).toBe(0)
-        expect(kvWins.record.shadowedLegacyKeys).toEqual(['memory'])
+    // upstream v210 migrateLegacy: a leftover legacy entry is older than an
+    // inline value written by an older build, so it is dropped unread.
+    test('cad8595a data (no index): an inline value wins over the legacy map', () => {
+        const r = resolve({ [LEGACY_MAP_KEY]: { memory: LEGACY }, memory: 'written after the move' }, { [LEGACY]: 'cold value' })
+        expect(r.values.size).toBe(0)
+        expect(r.reads).toEqual([])
+        expect(r.record.shadowedLegacyKeys).toEqual(['memory'])
     })
 
     test('reserved names inside the layouts and a non-object legacy map never become plugin keys', () => {

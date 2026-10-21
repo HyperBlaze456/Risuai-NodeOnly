@@ -76,13 +76,10 @@ function sample(keys) {
  *   undefined when it does not exist; may throw when it cannot be read.
  * @param {(key: string) => boolean} opts.isPresent whether `key` already holds
  *   a live value that wins over the cold copies.
- * @param {boolean} [opts.legacyOverridesPresent] cad8595a data only (no
- *   index): a `_coldplugin` value replaces a present key, which is then the
- *   stale copy left from before upstream moved it.
  * @param {string} opts.source recorded with the recovery entry.
  * @returns {{ assign: Array<[string, unknown]>, record: object|null, restored: number, failed: number }}
  */
-function resolveUpstreamPluginStorage(storage, { readCold, isPresent, legacyOverridesPresent = false, source }) {
+function resolveUpstreamPluginStorage(storage, { readCold, isPresent, source }) {
     const assign = [];
     const assigned = new Set();
     const record = { source, at: Date.now() };
@@ -142,13 +139,14 @@ function resolveUpstreamPluginStorage(storage, { readCold, isPresent, legacyOver
             record.invalidLegacyMap = legacyMap;
             keepRecord = true;
         } else {
-            // With an index the legacy map only holds items upstream could not
-            // migrate yet, so the index and present keys are newer.
-            const overrides = legacyOverridesPresent && !hasPointer;
+            // The per-key map predates the index, and a present key of the
+            // same name was written after upstream moved it (an older build,
+            // a V2 plugin), so both are newer — upstream's migrateLegacy drops
+            // such a legacy entry unread. Its cold row is left in place.
             for (const key of Object.keys(legacyMap)) {
                 const id = legacyMap[key];
                 if (isReservedKey(key)) continue;
-                if (indexEntries.has(key) || assigned.has(key) || (!overrides && isPresent(key))) {
+                if (indexEntries.has(key) || assigned.has(key) || isPresent(key)) {
                     shadowedLegacy.push(key);
                     continue;
                 }
