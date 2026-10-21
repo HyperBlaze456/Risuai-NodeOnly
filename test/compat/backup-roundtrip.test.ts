@@ -681,6 +681,57 @@ describe('malformed import safety', () => {
     const after = normalizeBackup(await client.exportBackup())
     expect(after.normalized.characters).toEqual(before.normalized.characters)
   })
+
+  // Entries are committed in batches of 5,000. Rows the backup replaces used
+  // to be deleted in the first batch, so a rejection past it (here a duplicate
+  // entry; upstream web backups put the encryption marker after every asset)
+  // left the old database without its images and cold items.
+  test('a backup rejected after the first batch keeps the existing images and cold items', async () => {
+    const srv = await spawnServer()
+    servers.push(srv)
+    const client = await createClient(srv.port, srv.password)
+
+    await client.importBackup(createSeedBackup({
+      characterCount: 2,
+      includeAssets: true,
+      coldStorageEntries: { '3e9fad85-8041-4f4e-ad51-6a7f8e9fa0b4': { kept: true } },
+    }))
+    const before = await client.exportBackup()
+    const beforeAssets = fingerprintAssets(before)
+    expect(beforeAssets.length).toBe(3)
+
+    const bulk = Array.from({ length: 5_100 }, (_, i) => ({ name: `bulk-${i}.png`, data: Buffer.from(`bulk-${i}`) }))
+    const rejected = Buffer.concat([
+      encodeBackup([...bulk, { name: 'bulk-0.png', data: Buffer.from('again') }]),
+      createSeedBackup({ characterCount: 1 }),
+    ])
+    const result = await importViaNdjson(client, rejected).catch(() => null)
+    expect(result?.done).toBeUndefined()
+
+    expect(await readDatabaseStatus(client)).toBe(200)
+    const after = await client.exportBackup()
+    expect(normalizeBackup(after).normalized.characters).toEqual(normalizeBackup(before).normalized.characters)
+    // Nothing of the rejected backup stays behind either: the rows committed
+    // with the first batch are taken back, so later exports don't carry them.
+    expect(fingerprintAssets(after)).toEqual(beforeAssets)
+  })
+
+  test('an accepted backup still replaces images and cold items wholesale', async () => {
+    const srv = await spawnServer()
+    servers.push(srv)
+    const client = await createClient(srv.port, srv.password)
+
+    await client.importBackup(createSeedBackup({
+      characterCount: 2,
+      includeAssets: true,
+      coldStorageEntries: { '3e9fad85-8041-4f4e-ad51-6a7f8e9fa0b4': { dropped: true } },
+    }))
+    // One character: test-asset-0 again (same name and bytes), no test-asset-1, no cold item.
+    const next = createSeedBackup({ characterCount: 1, includeAssets: true })
+    expect((await client.importBackup(next)).ok).toBe(true)
+
+    expect(fingerprintAssets(await client.exportBackup())).toEqual(fingerprintAssets(next))
+  })
 })
 
 // ─── Unreadable database payloads ───────────────────────────────────────────

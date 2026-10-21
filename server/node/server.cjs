@@ -2869,6 +2869,19 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     const importedSidecarIds = new Set();
     const explicitSidecarMap = new Map();
     const legacyInlayInfoMap = new Map();
+    // Rows a backup replaces wholesale. They are deleted in the final
+    // transaction, and only those the backup did not bring: entries are
+    // committed in BATCH_SIZE batches, so a delete in the first batch survived
+    // a rejection later in the stream (duplicate entry, the encryption marker
+    // upstream writes after every asset, a truncated upload, an undecodable
+    // database) and left the old database without its images and cold items.
+    // Rows the import creates are removed again when it fails (createdKeys).
+    // Incoming rows overwrite same-named old rows on the way in and stay;
+    // asset names are content hashes and cold ids are UUIDs, so those carry
+    // the same data.
+    const REPLACED_PREFIXES = ['assets/', 'inlay/', 'inlay_thumb/', 'inlay_meta/', 'inlay_info/', 'coldstorage/', 'drafts/', 'remotes/'];
+    const importedKeys = new Set();
+    const createdKeys = new Set();
 
     const stagingDir = path.join(savePath, 'inlays_import_staging');
     const backupInlayDir = path.join(savePath, 'inlays_import_backup');
@@ -2924,31 +2937,6 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     sqliteDb.pragma('synchronous = OFF');
 
     sqliteDb.exec('BEGIN');
-    kvDelPrefix('assets/');
-    kvDelPrefix('inlay/');
-    kvDelPrefix('inlay_thumb/');
-    kvDelPrefix('inlay_meta/');
-    kvDelPrefix('inlay_info/');
-    kvDelPrefix('coldstorage/');
-    // archive/ and archive-meta/ rows are deliberately NOT wiped: the imported
-    // database is inlined and references none of them, and the pre-import
-    // snapshot may still. They become orphan rows for the dashboard purge.
-    // NOTE: plugin-storage/ is NOT cleared here — see the final COMMIT below.
-    // Composer drafts are session/device-local and not carried in the backup;
-    // wipe stale ones so an old snapshot's chats don't resurrect later drafts.
-    kvDelPrefix('drafts/');
-    // Same reasoning as clearExistingData (save-folder import path): wipe stale
-    // remote payloads from the prior user before this backup's contents land.
-    // .bin backups never carry REMOTE blocks today, so the migration won't
-    // resolveRemote on them — but keeping the two import paths consistent
-    // avoids a contamination regression if that ever changes (upstream sync,
-    // plugin-generated buffers, etc.).
-    kvDelPrefix('remotes/');
-    // Allow remote-block migration to re-evaluate against the new database.bin.
-    // (.bin backups themselves never carry REMOTE blocks — legacy msgpack
-    // format only — but a fresh import is a clear "data changed" signal.)
-    kvDel(REMOTE_MIGRATION_MARKER_KEY);
-    clearEntities();
 
     try {
         for await (const chunk of dataSource) {
@@ -3065,7 +3053,9 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
                                 parseColdStorageJsonBuffer(data, name, { allowPlainJson: true }).coldData
                             )
                             : data;
+                        if (kvGetUpdatedAt(storageKey) === null) createdKeys.add(storageKey);
                         kvSet(storageKey, storageValue);
+                        importedKeys.add(storageKey);
                         assetsRestored += 1;
                     }
                 }
@@ -3129,9 +3119,38 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
         // the marker with the prefix makes the re-split a first migration
         // (DB-wins), which is what a full replace means.
         kvDelPrefix(pluginStorage.PREFIX);
+        // See REPLACED_PREFIXES. archive/ and archive-meta/ rows are
+        // deliberately NOT wiped: the imported database is inlined and
+        // references none of them, and the pre-import snapshot may still.
+        // They become orphan rows for the dashboard purge. Composer drafts are
+        // session/device-local and not carried in the backup, so stale ones
+        // go and an old snapshot's chats don't resurrect later drafts. Stale
+        // remote payloads go for the same reason as in clearExistingData
+        // (save-folder import): .bin backups never carry REMOTE blocks today,
+        // but keeping the two import paths consistent avoids a contamination
+        // regression if that ever changes.
+        for (const prefix of REPLACED_PREFIXES) {
+            for (const key of kvList(prefix)) {
+                if (!importedKeys.has(key)) kvDel(key);
+            }
+        }
+        // Allow remote-block migration to re-evaluate against the new
+        // database.bin — a fresh import is a clear "data changed" signal.
+        kvDel(REMOTE_MIGRATION_MARKER_KEY);
+        clearEntities();
         sqliteDb.exec('COMMIT');
     } catch (error) {
         try { sqliteDb.exec('ROLLBACK'); } catch (_) {}
+        // Earlier batches are committed already: take back the rows they added.
+        if (createdKeys.size > 0) {
+            try {
+                sqliteDb.transaction(() => {
+                    for (const key of createdKeys) kvDel(key);
+                })();
+            } catch (cleanupError) {
+                logger.error(`[Backup Import] Could not remove ${createdKeys.size} row(s) of the failed import:`, cleanupError);
+            }
+        }
         await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
         await fs.rm(backupInlayDir, { recursive: true, force: true }).catch(() => {});
         throw error;
