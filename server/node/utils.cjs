@@ -23,6 +23,9 @@ const RisuSaveType = {
     PLUGINS: 9,
     LOADOUTS: 10,
     PLUGIN_STORAGE: 11,
+    // Upstream SaveKV namespace block (`kv:<namespace>`, dae3f6509). PocketRisu
+    // has no SaveKV store; the block is reported and skipped.
+    KV: 12,
 };
 
 // Packr/Unpackr instances
@@ -327,6 +330,10 @@ class RisuSaveDecoder {
                             compression: false,
                             content: new TextDecoder().decode(resolved),
                         });
+                        break;
+                    }
+                    case RisuSaveType.KV: {
+                        logger.warn(`[RisuSaveDecoder] Skipping upstream SaveKV block ${this.blocks[key].name}: not supported`);
                         break;
                     }
                     default: {
