@@ -624,6 +624,31 @@ describe('malformed import safety', () => {
     const after = normalizeBackup(afterExport)
     expect(after.normalized.characterCount).toBe(1)
   })
+
+  test('server survives a backup rejected mid-upload', async () => {
+    const srv = await spawnServer()
+    servers.push(srv)
+    const client = await createClient(srv.port, srv.password)
+
+    await client.importBackup(createSeedBackup({ characterCount: 1 }))
+    const before = normalizeBackup(await client.exportBackup())
+
+    // The duplicate entry is rejected while the upload is still streaming;
+    // the handler's cleanup then read req.socket.server after the socket was
+    // detached, and the unhandled rejection exited the process.
+    const duplicated = Buffer.concat([
+      createSeedBackup({ characterCount: 2 }),
+      encodeBackup([
+        { name: 'dup-asset.png', data: Buffer.from('a') },
+        { name: 'dup-asset.png', data: Buffer.from('b') },
+      ]),
+    ])
+    await importViaNdjson(client, duplicated).catch(() => null)
+
+    expect(await readDatabaseStatus(client)).toBe(200)
+    const after = normalizeBackup(await client.exportBackup())
+    expect(after.normalized.characters).toEqual(before.normalized.characters)
+  })
 })
 
 // ─── Unreadable database payloads ───────────────────────────────────────────

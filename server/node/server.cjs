@@ -5481,11 +5481,15 @@ app.post('/api/backup/import', async (req, res, next) => {
     }
     importInProgress = true;
 
-    // Disable timeouts for large backup uploads
-    const prevRequestTimeout = req.socket.server?.requestTimeout;
+    // Disable timeouts for large backup uploads. Keep the server reference:
+    // when the upload is cut off (client abort, rejection mid-stream) the
+    // finally block runs after req.socket was detached, and reading
+    // req.socket.server there threw and took the whole process down.
+    const httpServer = req.socket.server;
+    const prevRequestTimeout = httpServer?.requestTimeout;
     req.socket.setTimeout(0);
     req.socket.setKeepAlive(true);
-    if (req.socket.server) req.socket.server.requestTimeout = 0;
+    if (httpServer) httpServer.requestTimeout = 0;
 
     // NDJSON streaming keeps the response socket alive during long
     // post-upload work (WAL checkpoint, cold-storage migration). Without it
@@ -5559,8 +5563,8 @@ app.post('/api/backup/import', async (req, res, next) => {
     } finally {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         importInProgress = false;
-        if (req.socket.server && prevRequestTimeout !== undefined) {
-            req.socket.server.requestTimeout = prevRequestTimeout;
+        if (httpServer && prevRequestTimeout !== undefined) {
+            httpServer.requestTimeout = prevRequestTimeout;
         }
     }
 });
@@ -6383,8 +6387,10 @@ app.post('/api/migrate/save-folder/upload', async (req, res, next) => {
 
     req.socket.setTimeout(0);
     req.socket.setKeepAlive(true);
-    const prevRequestTimeout = req.socket.server?.requestTimeout;
-    if (req.socket.server) req.socket.server.requestTimeout = 0;
+    // Same as /api/backup/import: req.socket can be detached by the finally block.
+    const httpServer = req.socket.server;
+    const prevRequestTimeout = httpServer?.requestTimeout;
+    if (httpServer) httpServer.requestTimeout = 0;
 
     try {
         const chunks = [];
@@ -6430,8 +6436,8 @@ app.post('/api/migrate/save-folder/upload', async (req, res, next) => {
         res.status(400).json({ error: error.message || 'Import failed' });
     } finally {
         importInProgress = false;
-        if (req.socket.server && prevRequestTimeout !== undefined) {
-            req.socket.server.requestTimeout = prevRequestTimeout;
+        if (httpServer && prevRequestTimeout !== undefined) {
+            httpServer.requestTimeout = prevRequestTimeout;
         }
     }
 });
