@@ -356,6 +356,7 @@ async function flushPendingDb() {
 async function writePendingDb() {
     clearTimeout(saveTimers[DB_HEX_KEY]);
     delete saveTimers[DB_HEX_KEY];
+    const cold = !dbCache[DB_HEX_KEY];
     try {
         if (dbCache[DB_HEX_KEY]) {
             await persistDbCacheWithChats(DB_HEX_KEY, 'database/database.bin');
@@ -366,11 +367,13 @@ async function writePendingDb() {
                 const dbObj = normalizeJSON(await decodeRisuSave(raw));
                 const fullDb = hydrateDatabaseForDisk(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
                 kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy(fullDb)));
+                clearPersistFailure();
             }
         }
     } catch (error) {
         // The timer was the only record that memory is ahead of disk.
-        retryDatabasePersistLater('flush');
+        if (cold) retryColdPersistLater('flush');
+        else retryDatabasePersistLater('flush');
         throw error;
     }
     createBackupAndRotate();
@@ -387,6 +390,22 @@ const PERSIST_RETRY_MS = process.env.POCKETRISU_PERSIST_RETRY_MS
 function retryDatabasePersistLater(source) {
     if (!dbCache[DB_HEX_KEY] || saveTimers[DB_HEX_KEY]) return;
     scheduleDatabasePersist(`${source}:retry`, PERSIST_RETRY_MS);
+}
+
+// The same for a write of the chat store with no dbCache (right after a
+// restart or an import): the store is still ahead of disk. The timer is the
+// record of that — the next flush writes again, a cold load's included,
+// which then fails rather than rebuild the store without those bodies — and
+// it also retries on its own.
+function retryColdPersistLater(source) {
+    if (saveTimers[DB_HEX_KEY]) return;
+    const timer = setTimeout(() => {
+        queueStorageOperation(async () => {
+            if (saveTimers[DB_HEX_KEY] !== timer) return;
+            await flushPendingDb();
+        }).catch((error) => logger.error(`[${source}] Retry failed:`, error));
+    }, PERSIST_RETRY_MS);
+    saveTimers[DB_HEX_KEY] = timer;
 }
 
 // ── /api/patch × plugin storage ─────────────────────────────────────────────
@@ -438,36 +457,18 @@ async function loadDbCacheIfMissing({ createBackup = false } = {}) {
     await flushPendingDb();
     const raw = kvGet('database/database.bin');
     if (!raw) return false;
-    const previous = fullChatStore;
+    // The flush writes only chats the database lists; a body posted before
+    // its entry is carried across the rebuild (carryUnlistedChatPosts).
     const dbObj = await initChatStoreFromDisk(await decodeDatabaseWithPersistentChatIds(raw, { createBackup }));
-    carryUnlistedChats(previous, dbObj);
     dbCache[DB_HEX_KEY] = normalizeJSON(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
     return true;
-}
-
-// The flush can only write chats the database lists. A chat created right
-// after a restart reaches the server before the patch that adds its entry, so
-// its body has no copy on disk; keep it across the rebuild. Only under
-// characters the database lists — a character off the list is the business
-// of carryPendingActivations.
-function carryUnlistedChats(previous, dbObj) {
-    if (!previous || !fullChatStore) return;
-    for (const char of Array.isArray(dbObj?.characters) ? dbObj.characters : []) {
-        const previousChats = char?.chaId ? previous.get(char.chaId) : null;
-        if (!previousChats) continue;
-        const listed = new Set((Array.isArray(char.chats) ? char.chats : []).map((chat) => chat?.id).filter(Boolean));
-        for (const [chatId, chat] of previousChats) {
-            if (listed.has(chatId)) continue;
-            if (!fullChatStore.has(char.chaId)) fullChatStore.set(char.chaId, new Map());
-            fullChatStore.get(char.chaId).set(chatId, chat);
-        }
-    }
 }
 
 function invalidateDbCache() {
     delete dbCache[DB_HEX_KEY];
     fullChatStore = null;
     pendingActivations.clear();
+    unlistedChatPosts.clear();
     if (saveTimers[DB_HEX_KEY]) {
         clearTimeout(saveTimers[DB_HEX_KEY]);
         delete saveTimers[DB_HEX_KEY];
@@ -717,6 +718,53 @@ function initChatStore(dbObj) {
         if (charChats.size > 0) {
             fullChatStore.set(char.chaId, charChats);
         }
+    }
+    carryUnlistedChatPosts(previous, dbObj);
+}
+
+// Chat bodies posted while the database did not list the chat: a chat (or a
+// character) created on the client reaches the server before the patch that
+// adds its entry. Every store rebuild — a persist, a full write, a cold load —
+// keeps only listed chats, and disk has no copy of these, so carry them across
+// until the database lists them. A post the entry never follows (the chat was
+// deleted first) is forgotten after UNLISTED_CHAT_POST_TTL_MS.
+const unlistedChatPosts = new Map(); // `${chaId}\0${chatId}` → { chaId, chatId, at }
+const UNLISTED_CHAT_POST_TTL_MS = 10 * 60 * 1000;
+
+function isChatListed(dbObj, chaId, chatId) {
+    const char = Array.isArray(dbObj?.characters) ? dbObj.characters.find((c) => c?.chaId === chaId) : null;
+    return Array.isArray(char?.chats) && char.chats.some((chat) => chat?.id === chatId);
+}
+
+function recordChatPost(chaId, chatId) {
+    if (isChatListed(dbCache[DB_HEX_KEY], chaId, chatId)) return;
+    unlistedChatPosts.set(`${chaId}\0${chatId}`, { chaId, chatId, at: Date.now() });
+}
+
+// Once the database lists a posted chat, its body is persisted like any other
+// one. A delete that follows before the next rebuild must not find the post
+// still on record and carry the deleted body across it.
+function forgetListedChatPosts(dbObj) {
+    if (unlistedChatPosts.size === 0) return;
+    for (const [key, post] of unlistedChatPosts) {
+        if (isChatListed(dbObj, post.chaId, post.chatId)) unlistedChatPosts.delete(key);
+    }
+}
+
+function carryUnlistedChatPosts(previous, dbObj) {
+    if (unlistedChatPosts.size === 0) return;
+    const now = Date.now();
+    // A deactivated character's chats are carryPendingActivations' business.
+    const archived = new Set(archivedStubsOf(dbObj).map((s) => s.chaId));
+    for (const [key, post] of unlistedChatPosts) {
+        if (now - post.at > UNLISTED_CHAT_POST_TTL_MS || isChatListed(dbObj, post.chaId, post.chatId)) {
+            unlistedChatPosts.delete(key);
+            continue;
+        }
+        const body = previous?.get(post.chaId)?.get(post.chatId);
+        if (!body || archived.has(post.chaId)) continue;
+        if (!fullChatStore.has(post.chaId)) fullChatStore.set(post.chaId, new Map());
+        fullChatStore.get(post.chaId).set(post.chatId, body);
     }
 }
 
@@ -3199,6 +3247,11 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
         sqliteDb.pragma('synchronous = NORMAL');
     }
 
+    // The new database is committed: drop what describes the old one now. A
+    // failure in the inlay swap below throws past the rest of this function,
+    // and a store left behind would be flushed back over the import.
+    invalidateDbCache();
+
     await ensureInlayDir();
     try {
         if (existsSync(inlayDir)) {
@@ -3215,8 +3268,6 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
         await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
         throw swapError;
     }
-
-    invalidateDbCache();
 
     // Trigger cold storage migration now so import result includes failure count.
     const dbRaw = kvGet('database/database.bin');
@@ -4925,6 +4976,7 @@ app.post('/api/patch', async (req, res, next) => {
                 databasePatchHashCache.update(dbCache[filePath], next, patch);
             }
             dbCache[filePath] = next;
+            if (decodedKey === 'database/database.bin') forgetListedChatPosts(next);
             // DB patch is in; now the kv half (see ordering note above).
             applyPluginKvOps();
 
@@ -5208,6 +5260,13 @@ app.post('/api/assets/bulk-write', async (req, res, next) => {
         const entries = req.body; // {key: string, value: base64}[]
         if(!Array.isArray(entries)){
             res.status(400).send({ error: 'Body must be a JSON array of {key, value}' });
+            return;
+        }
+        // database.bin goes through /api/write. Written here it would skip
+        // every guard and leave dbCache and the chat store describing the
+        // old one, which the next flush writes back over it.
+        if(entries.some((entry) => entry?.key === DB_BLOB_KEY)){
+            res.status(400).send({ error: 'database/database.bin cannot be written through bulk-write' });
             return;
         }
         for(let i = 0; i < entries.length; i += BULK_BATCH){
@@ -6276,6 +6335,7 @@ app.post('/api/chat-content/:chaId/:chatIndex', async (req, res, next) => {
                 fullChatStore.set(chaId, new Map());
             }
             fullChatStore.get(chaId).set(expectedChatId, chatData);
+            recordChatPost(chaId, expectedChatId);
 
             // Schedule debounced persist (reuses existing timer mechanism)
             if (saveTimers[DB_HEX_KEY]) {
@@ -6283,6 +6343,7 @@ app.post('/api/chat-content/:chaId/:chatIndex', async (req, res, next) => {
             }
             saveTimers[DB_HEX_KEY] = setTimeout(async () => {
                 let failed = false;
+                const cold = !dbCache[DB_HEX_KEY];
                 try {
                     // If dbCache has stripped DB, persist with merged chats
                     if (dbCache[DB_HEX_KEY]) {
@@ -6319,7 +6380,8 @@ app.post('/api/chat-content/:chaId/:chatIndex', async (req, res, next) => {
                 } finally {
                     delete saveTimers[DB_HEX_KEY];
                 }
-                if (failed) retryDatabasePersistLater('chat-content');
+                if (failed && cold) retryColdPersistLater('chat-content');
+                else if (failed) retryDatabasePersistLater('chat-content');
             }, SAVE_INTERVAL);
 
             res.json({ success: true });
