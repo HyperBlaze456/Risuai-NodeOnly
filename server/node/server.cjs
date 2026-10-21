@@ -335,29 +335,45 @@ function createBackupAndRotate({ force = false } = {}) {
     trimSnapshotsToLimits();
 }
 
+// The flush that took the persist timer, while it is still writing.
+let dbFlushInFlight = null;
+
 async function flushPendingDb() {
-    if (saveTimers[DB_HEX_KEY]) {
-        clearTimeout(saveTimers[DB_HEX_KEY]);
-        delete saveTimers[DB_HEX_KEY];
-        try {
-            if (dbCache[DB_HEX_KEY]) {
-                await persistDbCacheWithChats(DB_HEX_KEY, 'database/database.bin');
-            } else if (fullChatStore && fullChatStore.size > 0) {
-                // No stripped cache but chat store has data — merge and persist directly
-                const raw = kvGet('database/database.bin');
-                if (raw) {
-                    const dbObj = normalizeJSON(await decodeRisuSave(raw));
-                    const fullDb = hydrateDatabaseForDisk(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
-                    kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy(fullDb)));
-                }
-            }
-        } catch (error) {
-            // The timer was the only record that memory is ahead of disk.
-            retryDatabasePersistLater('flush');
-            throw error;
-        }
-        createBackupAndRotate();
+    // /api/read and export flush outside the storage queue. A flush that
+    // finds the timer already taken must wait for that write: a cold load
+    // right after would otherwise read the disk from before it.
+    while (dbFlushInFlight) await dbFlushInFlight.catch(() => {});
+    if (!saveTimers[DB_HEX_KEY]) return;
+    const flush = writePendingDb();
+    dbFlushInFlight = flush;
+    try {
+        await flush;
+    } finally {
+        if (dbFlushInFlight === flush) dbFlushInFlight = null;
     }
+}
+
+async function writePendingDb() {
+    clearTimeout(saveTimers[DB_HEX_KEY]);
+    delete saveTimers[DB_HEX_KEY];
+    try {
+        if (dbCache[DB_HEX_KEY]) {
+            await persistDbCacheWithChats(DB_HEX_KEY, 'database/database.bin');
+        } else if (fullChatStore && fullChatStore.size > 0) {
+            // No stripped cache but chat store has data — merge and persist directly
+            const raw = kvGet('database/database.bin');
+            if (raw) {
+                const dbObj = normalizeJSON(await decodeRisuSave(raw));
+                const fullDb = hydrateDatabaseForDisk(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
+                kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy(fullDb)));
+            }
+        }
+    } catch (error) {
+        // The timer was the only record that memory is ahead of disk.
+        retryDatabasePersistLater('flush');
+        throw error;
+    }
+    createBackupAndRotate();
 }
 
 // A failed persist used to drop its timer, so nothing wrote the pending
@@ -416,11 +432,36 @@ function partitionPluginStorageOps(patch) {
 // Returns false when there is no blob on disk.
 async function loadDbCacheIfMissing({ createBackup = false } = {}) {
     if (dbCache[DB_HEX_KEY]) return true;
+    // A chat body saved while the cache was cold (right after a restart or an
+    // import) is only in fullChatStore until the debounced persist, and the
+    // load below rebuilds the store from disk. Write it out first.
+    await flushPendingDb();
     const raw = kvGet('database/database.bin');
     if (!raw) return false;
+    const previous = fullChatStore;
     const dbObj = await initChatStoreFromDisk(await decodeDatabaseWithPersistentChatIds(raw, { createBackup }));
+    carryUnlistedChats(previous, dbObj);
     dbCache[DB_HEX_KEY] = normalizeJSON(stripDatabaseForClient(dbObj, { reconcileManifests: true }));
     return true;
+}
+
+// The flush can only write chats the database lists. A chat created right
+// after a restart reaches the server before the patch that adds its entry, so
+// its body has no copy on disk; keep it across the rebuild. Only under
+// characters the database lists — a character off the list is the business
+// of carryPendingActivations.
+function carryUnlistedChats(previous, dbObj) {
+    if (!previous || !fullChatStore) return;
+    for (const char of Array.isArray(dbObj?.characters) ? dbObj.characters : []) {
+        const previousChats = char?.chaId ? previous.get(char.chaId) : null;
+        if (!previousChats) continue;
+        const listed = new Set((Array.isArray(char.chats) ? char.chats : []).map((chat) => chat?.id).filter(Boolean));
+        for (const [chatId, chat] of previousChats) {
+            if (listed.has(chatId)) continue;
+            if (!fullChatStore.has(char.chaId)) fullChatStore.set(char.chaId, new Map());
+            fullChatStore.get(char.chaId).set(chatId, chat);
+        }
+    }
 }
 
 function invalidateDbCache() {
