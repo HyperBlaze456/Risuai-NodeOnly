@@ -21,6 +21,7 @@ import { getLLMCache, searchLLMCache } from "src/ts/translator/translator";
 import { hasher, risuChatParser, type CbsConditions } from "src/ts/parser/parser.svelte";
 import { LLMFlags, LLMFormat, LLMProvider, LLMTokenizer, type LLMModel } from "src/ts/model/types";
 import { readPersistentJson, removePersistentKey, writePersistentJson } from "src/ts/storage/persistentKv";
+import { createPluginPermissionGate, createPluginScriptHashGetter, type PluginPermission, type PluginPermissionState } from "./pluginPermissionCache";
 import { endAllGenerations } from "src/ts/process/generationState";
 import { sendChat as processSendChat, doingChat } from "src/ts/process/index.svelte";
 import { processScriptFull } from "src/ts/process/scripts";
@@ -568,49 +569,30 @@ const unloadV3Plugin = async (pluginName: string) => {
     }
 }
 
-type PluginPermissionDesc = 'fetchLogs'|'db'|'mainDom'|'replacer'|'provider'|'sendChat'|'inlay';
-const pluginPermissionDescs: PluginPermissionDesc[] = ['fetchLogs', 'db', 'mainDom', 'replacer', 'provider', 'sendChat', 'inlay'];
-
-// Plugin names are free text (the //@name directive), so `${name}_${desc}` keys
-// can collide — both across permissions and with a legacy name-only entry that
-// happens to read like "name_desc". JSON-encoding the pair makes every key
-// unambiguous: ["foo","db"] can never equal a plain "foo_db" or ["foo_db","x"].
-const permissionKeyOf = (pluginName: string, permissionDesc: string) =>
-    JSON.stringify([pluginName, permissionDesc])
-
-const permissionGivenPlugins: Set<string> = new Set();
-const permissionDeniedPlugins: Set<string> = new Set();
-const permissionCache = new Map<string, boolean | number>();
 const pluginPermissionStateKey = 'cache/plugin-permissions/state.json';
-let pluginPermissionLoadPromise: Promise<void> | null = null;
 
-async function ensurePluginPermissionStateLoaded() {
-    if (!pluginPermissionLoadPromise) {
-        pluginPermissionLoadPromise = (async () => {
-            const payload = await readPersistentJson<{
-                given: string[]
-                denied: string[]
-                cache: [string, boolean | number][]
-            }>(pluginPermissionStateKey)
-            if (!payload) {
-                return
-            }
-            permissionGivenPlugins.clear()
-            permissionDeniedPlugins.clear()
-            permissionCache.clear()
-            for (const pluginName of payload.given ?? []) {
-                permissionGivenPlugins.add(pluginName)
-            }
-            for (const pluginName of payload.denied ?? []) {
-                permissionDeniedPlugins.add(pluginName)
-            }
-            for (const [key, value] of payload.cache ?? []) {
-                permissionCache.set(key, value)
-            }
-        })()
+const pluginPermissionConsent = (permission: PluginPermission): string => {
+    const consent: Record<PluginPermission, string> = {
+        fetchLogs: language.fetchLogConsent,
+        db: language.getFullDatabaseConsent,
+        mainDom: language.mainDomAccessConsent,
+        replacer: language.replacerPermissionConsent,
+        provider: language.providerPermissionConsent,
+        sendChat: language.sendChatConsent,
+        inlay: language.inlayPermissionConsent,
     }
-    await pluginPermissionLoadPromise
+    return consent[permission]
 }
+
+const pluginPermissionGate = createPluginPermissionGate({
+    read: () => readPersistentJson<PluginPermissionState>(pluginPermissionStateKey),
+    write: (state) => writePersistentJson(pluginPermissionStateKey, state),
+    remove: () => removePersistentKey(pluginPermissionStateKey),
+    confirm: (pluginName, permission) => alertConfirm(pluginPermissionConsent(permission).replace("{}", pluginName)),
+    // Denials are remembered, so tell the user how to undo a misclick.
+    // Awaited by the gate so the next queued permission dialog doesn't overwrite it.
+    onDenied: (pluginName) => alertNormalWait(language.pluginPermissionDenyGuide.replace("{}", pluginName)),
+});
 
 // A fullscreen plugin frame sits above the whole app (z-index 1000), which
 // also covered the app's own alerts — among them the permission prompt the
@@ -634,45 +616,15 @@ function watchAlertLayer() {
 }
 
 export async function resetAllPluginPermissions() {
-    permissionGivenPlugins.clear()
-    permissionDeniedPlugins.clear()
-    permissionCache.clear()
-    pluginPermissionLoadPromise = Promise.resolve()
-    await removePersistentKey(pluginPermissionStateKey)
+    await pluginPermissionGate.resetAll()
 }
 
 export async function resetPluginPermission(pluginName: string) {
-    await ensurePluginPermissionStateLoaded()
-    // Permission descs are a fixed enum, so we delete the exact key for each
-    // one rather than prefix-matching (which would also wipe another plugin's
-    // keys). `pluginName` alone covers legacy name-only entries from older
-    // versions, which JSON keys never collide with but reset should still clear.
-    const exactKeys = pluginPermissionDescs.map(desc => permissionKeyOf(pluginName, desc))
-    for (const key of [pluginName, ...exactKeys]) {
-        permissionGivenPlugins.delete(key)
-        permissionDeniedPlugins.delete(key)
-    }
-    for (const desc of pluginPermissionDescs) {
-        permissionCache.delete(permissionKeyOf(pluginName, desc) + '_lastGrantTime')
-    }
+    // Decisions are keyed by code: this clears those of the installed script.
     const plugin = DBState.db.plugins?.find(p => p.name === pluginName)
     if (plugin?.script) {
-        const scriptHashBase = await hasher(new TextEncoder().encode(plugin.script))
-        for (const key of [...permissionCache.keys()]) {
-            if (key.startsWith(scriptHashBase + '_')) {
-                permissionCache.delete(key)
-            }
-        }
+        await pluginPermissionGate.resetScript(await hasher(new TextEncoder().encode(plugin.script)))
     }
-    await persistPluginPermissionState()
-}
-
-async function persistPluginPermissionState() {
-    await writePersistentJson(pluginPermissionStateKey, {
-        given: [...permissionGivenPlugins],
-        denied: [...permissionDeniedPlugins],
-        cache: [...permissionCache.entries()]
-    })
 }
 
 type PluginV3ProviderOptions = PluginV2ProviderOptions & {
@@ -680,108 +632,6 @@ type PluginV3ProviderOptions = PluginV2ProviderOptions & {
 }
 
 export const customV3ProviderMetaStore:LLMModel[] = []
-
-// Serializes permission dialogs. Every plugin shares the single global
-// alertStore, so when several plugins request permission at boot they would
-// otherwise overwrite each other's dialog — only the last one stays clickable
-// and a single click resolves all of them. The chain makes each dialog wait
-// for the previous one to finish, showing them one at a time.
-let pluginPermissionDialogChain: Promise<unknown> = Promise.resolve()
-
-const isPermissionResolved = async (
-    pluginName: string,
-    permissionDesc: PluginPermissionDesc,
-    requiresReconfirm: boolean,
-): Promise<{ resolved: boolean; value: boolean; pluginHash: string }> => {
-    const permissionKey = permissionKeyOf(pluginName, permissionDesc);
-    if (!requiresReconfirm && permissionGivenPlugins.has(permissionKey)) {
-        return { resolved: true, value: true, pluginHash: '' }
-    }
-    if (!requiresReconfirm && permissionDeniedPlugins.has(permissionKey)) {
-        return { resolved: true, value: false, pluginHash: '' }
-    }
-
-    const pluginHash = await hasher(
-        new TextEncoder().encode(
-            DBState.db.plugins.find(p => p.name === pluginName)?.script
-        )
-    ) + `_${permissionDesc}`;
-
-    if (!requiresReconfirm && permissionCache.get(pluginHash)) {
-        permissionGivenPlugins.add(permissionKey);
-        return { resolved: true, value: true, pluginHash }
-    }
-
-    return { resolved: false, value: false, pluginHash }
-}
-
-const getPluginPermission = async (pluginName: string, permissionDesc: PluginPermissionDesc, reconfirm: boolean|'periodically' = false) => {
-    await ensurePluginPermissionStateLoaded()
-
-    // 'periodically' grants are permanent: a (plugin, permission) pair is asked
-    // once and only re-prompted for permissions the plugin never requested
-    // before, matching the Android/extension model. Upstream's 3-day expiry was
-    // removed — it re-asked when nothing changed. Per-plugin reset still clears.
-    const computeRequiresReconfirm = () => {
-        return reconfirm === true;
-    }
-
-    // Fast path: if the answer is already known, skip the serialization queue
-    // entirely so cached/granted permissions never block on a pending dialog.
-    const early = await isPermissionResolved(pluginName, permissionDesc, computeRequiresReconfirm())
-    if (early.resolved) {
-        return early.value
-    }
-
-    const showDialog = async (): Promise<boolean> => {
-        // Re-check under the lock: an earlier queued dialog for the same plugin
-        // may have already granted/denied while we were waiting our turn, so we
-        // don't re-prompt.
-        const requiresReconfirm = computeRequiresReconfirm()
-        const recheck = await isPermissionResolved(pluginName, permissionDesc, requiresReconfirm)
-        if (recheck.resolved) {
-            return recheck.value
-        }
-        const pluginHash = recheck.pluginHash
-
-        let alertTitle =
-            permissionDesc === 'fetchLogs' ? language.fetchLogConsent.replace("{}", pluginName)
-            : permissionDesc === 'db' ? language.getFullDatabaseConsent.replace("{}", pluginName)
-            : permissionDesc === 'mainDom' ? language.mainDomAccessConsent.replace("{}", pluginName)
-            : permissionDesc === 'replacer' ? language.replacerPermissionConsent.replace("{}", pluginName)
-            : permissionDesc === 'provider' ? language.providerPermissionConsent.replace("{}", pluginName)
-            : permissionDesc === 'sendChat' ? language.sendChatConsent.replace("{}", pluginName)
-            : permissionDesc === 'inlay' ? language.inlayPermissionConsent.replace("{}", pluginName)
-            : `Error`
-        if(alertTitle === 'Error'){
-            return false;
-        }
-        const permissionKey = permissionKeyOf(pluginName, permissionDesc);
-        const conf = await alertConfirm(alertTitle)
-        if(conf && pluginHash){
-            permissionGivenPlugins.add(permissionKey);
-            permissionDeniedPlugins.delete(permissionKey);
-            permissionCache.set(pluginHash, true);
-            await persistPluginPermissionState()
-            return true;
-        }
-        permissionDeniedPlugins.add(permissionKey);
-        await persistPluginPermissionState()
-        // Denials are permanent, so tell the user how to undo a misclick.
-        // Awaited so the next queued permission dialog doesn't overwrite it.
-        await alertNormalWait(language.pluginPermissionDenyGuide.replace("{}", pluginName))
-        return false;
-    }
-
-    // Append to the dialog chain so only one permission dialog is shown at a
-    // time. finally restores the chain even if showDialog throws, so a single
-    // failure never deadlocks every later permission request.
-    const run = pluginPermissionDialogChain
-        .catch(() => {})
-        .then(() => showDialog())
-    pluginPermissionDialogChain = run.catch(() => {})
-    return run
-}
 
 const urlBlacklist = [
     'risuai.xyz',
@@ -798,6 +648,10 @@ const authorizationHeaders = [
 const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
 
     const oldApis = getV2PluginAPIs();
+    const getPluginScriptHash = createPluginScriptHashGetter(plugin.script, hasher)
+    const getPermission = async (permissionDesc: PluginPermission, reconfirm: boolean|'periodically' = false) => {
+        return pluginPermissionGate.request(plugin.name, await getPluginScriptHash(), permissionDesc, reconfirm)
+    }
     // Same character as oldApis.getChar/setChar, but with lazy assets filled
     // on read and the manifest kept on an assets-unchanged write (#80).
     const getCharacterForPlugin = async () => {
@@ -855,7 +709,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             let provs = get(customProviderStore)
             provs.push(name)
             const provider = async (arg: PluginV2ProviderArgument, abortSignal?: AbortSignal) => {
-               const conf = await getPluginPermission(plugin.name, 'provider', 'periodically');
+               const conf = await getPermission('provider', 'periodically');
                if(!conf){
                    return { success: false, content: `Provider permission denied for plugin '${plugin.name}'` };
                }
@@ -915,7 +769,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         removeRisuScriptHandler: oldApis.removeRisuScriptHandler,
         addRisuReplacer: async (name:string,func:Function) => {
             //permission check for replacer
-            const conf = await getPluginPermission(plugin.name, 'replacer', 'periodically');
+            const conf = await getPermission('replacer', 'periodically');
             if(!conf){
                 return;
             }
@@ -924,7 +778,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         removeRisuReplacer: oldApis.removeRisuReplacer,
         addRisuChatListener: async (mode:'output', func:Function) => {
             //permission check, lets use same as replacer
-            const conf = await getPluginPermission(plugin.name, 'replacer', 'periodically');
+            const conf = await getPermission('replacer', 'periodically');
             if(!conf){
                 return;
             }
@@ -949,7 +803,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         loadPlugins: oldApis.loadPlugins,
         readImage: oldApis.readImage,
         readInlay: async (id: string) => {
-            const conf = await getPluginPermission(plugin.name, 'inlay', 'periodically');
+            const conf = await getPermission('inlay', 'periodically');
             if(!conf){
                 return null;
             }
@@ -958,7 +812,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         saveAsset: oldApis.saveAsset,
         //Same functionality, but new implementation
         getDatabase: async (includeOnly:string[]|'all' = 'all') => {
-            const conf = await getPluginPermission(plugin.name, 'db', 'periodically');
+            const conf = await getPermission('db', 'periodically');
             if(!conf){
                 return null;
             }
@@ -1245,7 +1099,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             fullscreenPluginFrames.delete(iframe);
         },
         getRootDocument: async () => {
-            const conf = await getPluginPermission(plugin.name, 'mainDom');
+            const conf = await getPermission('mainDom');
             if(!conf){
                 return null;
             }
@@ -1290,7 +1144,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         },
         registerBodyIntercepter: async (callback: (body: any, type: string) => any) => {
 
-            if(await getPluginPermission(plugin.name, 'replacer') === false){
+            if(await getPermission('replacer') === false){
                 return null;
             }
             
@@ -1456,7 +1310,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             addPluginUnloadCallback(plugin.name, callback);
         },
         getFetchLogs: async () => {
-            const conf = await getPluginPermission(plugin.name, 'fetchLogs');
+            const conf = await getPermission('fetchLogs');
             if(!conf){
                 return null;
             }
@@ -1499,7 +1353,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         },
         checkCharOrder: checkCharOrder,
         requestPluginPermission: (permission:string) => {
-            return getPluginPermission(plugin.name, permission as any);
+            return getPermission(permission as any);
         },
         //Internal use APIs
         _getOldKeys: () => {
@@ -1609,7 +1463,7 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
             }, options.mode)
         },
         sendChat: async (message: string) => {
-            const conf = await getPluginPermission(plugin.name, 'sendChat');
+            const conf = await getPermission('sendChat');
             if(!conf){
                 return false;
             }
