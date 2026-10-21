@@ -2869,11 +2869,21 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     await fs.rm(backupInlayDir, { recursive: true, force: true });
     await fs.mkdir(stagingDir, { recursive: true });
 
+    // Entry ids become file names here. Ids are validated before use, and
+    // this check keeps a crafted name from writing outside the staging dir
+    // even if a parser misses one (e.g. "\" separators on Windows).
+    const resolvedStagingDir = path.resolve(stagingDir) + path.sep;
+    function assertInsideStagingDir(filePath) {
+        if (!path.resolve(filePath).startsWith(resolvedStagingDir)) {
+            throw new Error(`Path escapes inlay import staging directory: ${filePath}`);
+        }
+        return filePath;
+    }
     function stagingInlayFilePath(id, ext) {
-        return path.join(stagingDir, `${id}.${normalizeInlayExt(ext)}`);
+        return assertInsideStagingDir(path.join(stagingDir, `${id}.${normalizeInlayExt(ext)}`));
     }
     function stagingSidecarPath(id) {
-        return path.join(stagingDir, `${id}.meta.json`);
+        return assertInsideStagingDir(path.join(stagingDir, `${id}.meta.json`));
     }
     function writeStagingInlayFileSync(id, ext, buffer, info) {
         const normalizedExt = normalizeInlayExt(ext);
@@ -2962,6 +2972,11 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
                 const inlaySidecar = parseInlaySidecarBackupName(name);
 
                 if (inlayRaw) {
+                    // parseInlayBackupName only rejects "/"; an id with "\"
+                    // or ".." would escape the staging dir on Windows.
+                    if (!isSafeInlayId(inlayRaw.id)) {
+                        throw new Error(`Invalid inlay backup entry name: ${name}`);
+                    }
                     importedInlayIds.add(inlayRaw.id);
                     if (inlayRaw.ext) {
                         writeStagingInlayFileSync(inlayRaw.id, inlayRaw.ext, data, legacyInlayInfoMap.get(inlayRaw.id) || { ext: inlayRaw.ext, name: inlayRaw.id, type: 'image' });
