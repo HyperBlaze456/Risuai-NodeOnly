@@ -1520,7 +1520,9 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         // awaiting here keeps the plugin-facing contract unchanged. Writes also
         // record the originating plugin into the sidecar meta map.
         _getPluginStorage: async (key: string) => {
-            return (await pluginStorageStore.getItem(key)) || null
+            // `??`, not `||`: a stored 0, false or '' is a value (upstream
+            // returns it as is), only a missing key reads as null.
+            return (await pluginStorageStore.getItem(key)) ?? null
         },
         _setPluginStorage: async (key: string, value: any) => {
             try {
