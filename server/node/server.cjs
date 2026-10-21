@@ -37,6 +37,7 @@ const { decodeRisuSave, encodeRisuSaveLegacy, calculateHash, normalizeJSON, norm
 const { createPatchHashCache, decodePointerSegment } = require('./patch-hash-cache.cjs');
 const { clonePatchSnapshot } = require('./patch-selective-clone.cjs');
 const pluginStorage = require('./plugin-storage-store.cjs');
+const upstreamPluginStorage = require('./upstream-plugin-storage.cjs');
 const { createAssetManifestStore } = require('./assetManifestStore.cjs');
 const {
     stripAssetManifests,
@@ -549,15 +550,9 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
     // Same one-time path for upstream's cold-storage-backed plugin storage.
     // Must run before the kv split below so the restored values move with it.
     const coldPluginResult = restoreColdPluginStorageInDb(dbObj);
-    if (coldPluginResult.restored > 0 || coldPluginResult.failed > 0) needsPersist = true;
-    if (coldPluginResult.restored > 0) {
-        logger.info(`[ColdStorage] Restored ${coldPluginResult.restored} plugin storage key(s) from cold storage`);
-    }
-    if (coldPluginResult.failed > 0) {
-        logger.error(`[ColdStorage] ${coldPluginResult.failed} plugin storage key(s) could not be restored and were kept under pluginCustomStorage._coldplugin. Cold storage KV data is preserved.`);
-        for (const key of coldPluginResult.failedKeys) {
-            logger.error(`[ColdStorage]   - "${key}"`);
-        }
+    if (coldPluginResult) {
+        needsPersist = true;
+        logPluginStorageRestore('Restored', coldPluginResult);
     }
 
     // One-time move of pluginCustomStorage into kv (plugin-storage/*). Runs on
@@ -585,6 +580,17 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
         logger.error('[PluginStorage] Migration failed; plugin data stays in database.bin', e);
     }
 
+    let leakedPluginResult = null;
+    try {
+        leakedPluginResult = recoverLeakedPluginStorageKeys(dbObj);
+    } catch (e) {
+        logger.error('[PluginStorage] Recovering upstream plugin storage keys from kv failed; they stay as they are', e);
+    }
+    if (leakedPluginResult) {
+        needsPersist = true;
+        logPluginStorageRestore('Recovered', leakedPluginResult);
+    }
+
     if (needsPersist) {
         try {
             kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy(dbObj)));
@@ -604,6 +610,7 @@ async function decodeDatabaseWithPersistentChatIds(raw, options = {}) {
     }
     if (migrationResult) {
         migrationResult.coldStorageFailed = coldRestoreResult.failed;
+        migrationResult.pluginStorageColdFailed = (coldPluginResult?.failed || 0) + (leakedPluginResult?.failed || 0);
     }
     return dbObj;
 }
@@ -2862,6 +2869,19 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     const importedSidecarIds = new Set();
     const explicitSidecarMap = new Map();
     const legacyInlayInfoMap = new Map();
+    // Rows a backup replaces wholesale. They are deleted in the final
+    // transaction, and only those the backup did not bring: entries are
+    // committed in BATCH_SIZE batches, so a delete in the first batch survived
+    // a rejection later in the stream (duplicate entry, the encryption marker
+    // upstream writes after every asset, a truncated upload, an undecodable
+    // database) and left the old database without its images and cold items.
+    // Rows the import creates are removed again when it fails (createdKeys).
+    // Incoming rows overwrite same-named old rows on the way in and stay;
+    // asset names are content hashes and cold ids are UUIDs, so those carry
+    // the same data.
+    const REPLACED_PREFIXES = ['assets/', 'inlay/', 'inlay_thumb/', 'inlay_meta/', 'inlay_info/', 'coldstorage/', 'drafts/', 'remotes/'];
+    const importedKeys = new Set();
+    const createdKeys = new Set();
 
     const stagingDir = path.join(savePath, 'inlays_import_staging');
     const backupInlayDir = path.join(savePath, 'inlays_import_backup');
@@ -2869,11 +2889,21 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     await fs.rm(backupInlayDir, { recursive: true, force: true });
     await fs.mkdir(stagingDir, { recursive: true });
 
+    // Entry ids become file names here. Ids are validated before use, and
+    // this check keeps a crafted name from writing outside the staging dir
+    // even if a parser misses one (e.g. "\" separators on Windows).
+    const resolvedStagingDir = path.resolve(stagingDir) + path.sep;
+    function assertInsideStagingDir(filePath) {
+        if (!path.resolve(filePath).startsWith(resolvedStagingDir)) {
+            throw new Error(`Path escapes inlay import staging directory: ${filePath}`);
+        }
+        return filePath;
+    }
     function stagingInlayFilePath(id, ext) {
-        return path.join(stagingDir, `${id}.${normalizeInlayExt(ext)}`);
+        return assertInsideStagingDir(path.join(stagingDir, `${id}.${normalizeInlayExt(ext)}`));
     }
     function stagingSidecarPath(id) {
-        return path.join(stagingDir, `${id}.meta.json`);
+        return assertInsideStagingDir(path.join(stagingDir, `${id}.meta.json`));
     }
     function writeStagingInlayFileSync(id, ext, buffer, info) {
         const normalizedExt = normalizeInlayExt(ext);
@@ -2907,31 +2937,6 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     sqliteDb.pragma('synchronous = OFF');
 
     sqliteDb.exec('BEGIN');
-    kvDelPrefix('assets/');
-    kvDelPrefix('inlay/');
-    kvDelPrefix('inlay_thumb/');
-    kvDelPrefix('inlay_meta/');
-    kvDelPrefix('inlay_info/');
-    kvDelPrefix('coldstorage/');
-    // archive/ and archive-meta/ rows are deliberately NOT wiped: the imported
-    // database is inlined and references none of them, and the pre-import
-    // snapshot may still. They become orphan rows for the dashboard purge.
-    // NOTE: plugin-storage/ is NOT cleared here — see the final COMMIT below.
-    // Composer drafts are session/device-local and not carried in the backup;
-    // wipe stale ones so an old snapshot's chats don't resurrect later drafts.
-    kvDelPrefix('drafts/');
-    // Same reasoning as clearExistingData (save-folder import path): wipe stale
-    // remote payloads from the prior user before this backup's contents land.
-    // .bin backups never carry REMOTE blocks today, so the migration won't
-    // resolveRemote on them — but keeping the two import paths consistent
-    // avoids a contamination regression if that ever changes (upstream sync,
-    // plugin-generated buffers, etc.).
-    kvDelPrefix('remotes/');
-    // Allow remote-block migration to re-evaluate against the new database.bin.
-    // (.bin backups themselves never carry REMOTE blocks — legacy msgpack
-    // format only — but a fresh import is a clear "data changed" signal.)
-    kvDel(REMOTE_MIGRATION_MARKER_KEY);
-    clearEntities();
 
     try {
         for await (const chunk of dataSource) {
@@ -2962,6 +2967,11 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
                 const inlaySidecar = parseInlaySidecarBackupName(name);
 
                 if (inlayRaw) {
+                    // parseInlayBackupName only rejects "/"; an id with "\"
+                    // or ".." would escape the staging dir on Windows.
+                    if (!isSafeInlayId(inlayRaw.id)) {
+                        throw new Error(`Invalid inlay backup entry name: ${name}`);
+                    }
                     importedInlayIds.add(inlayRaw.id);
                     if (inlayRaw.ext) {
                         writeStagingInlayFileSync(inlayRaw.id, inlayRaw.ext, data, legacyInlayInfoMap.get(inlayRaw.id) || { ext: inlayRaw.ext, name: inlayRaw.id, type: 'image' });
@@ -3043,7 +3053,9 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
                                 parseColdStorageJsonBuffer(data, name, { allowPlainJson: true }).coldData
                             )
                             : data;
+                        if (kvGetUpdatedAt(storageKey) === null) createdKeys.add(storageKey);
                         kvSet(storageKey, storageValue);
+                        importedKeys.add(storageKey);
                         assetsRestored += 1;
                     }
                 }
@@ -3107,9 +3119,38 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
         // the marker with the prefix makes the re-split a first migration
         // (DB-wins), which is what a full replace means.
         kvDelPrefix(pluginStorage.PREFIX);
+        // See REPLACED_PREFIXES. archive/ and archive-meta/ rows are
+        // deliberately NOT wiped: the imported database is inlined and
+        // references none of them, and the pre-import snapshot may still.
+        // They become orphan rows for the dashboard purge. Composer drafts are
+        // session/device-local and not carried in the backup, so stale ones
+        // go and an old snapshot's chats don't resurrect later drafts. Stale
+        // remote payloads go for the same reason as in clearExistingData
+        // (save-folder import): .bin backups never carry REMOTE blocks today,
+        // but keeping the two import paths consistent avoids a contamination
+        // regression if that ever changes.
+        for (const prefix of REPLACED_PREFIXES) {
+            for (const key of kvList(prefix)) {
+                if (!importedKeys.has(key)) kvDel(key);
+            }
+        }
+        // Allow remote-block migration to re-evaluate against the new
+        // database.bin — a fresh import is a clear "data changed" signal.
+        kvDel(REMOTE_MIGRATION_MARKER_KEY);
+        clearEntities();
         sqliteDb.exec('COMMIT');
     } catch (error) {
         try { sqliteDb.exec('ROLLBACK'); } catch (_) {}
+        // Earlier batches are committed already: take back the rows they added.
+        if (createdKeys.size > 0) {
+            try {
+                sqliteDb.transaction(() => {
+                    for (const key of createdKeys) kvDel(key);
+                })();
+            } catch (cleanupError) {
+                logger.error(`[Backup Import] Could not remove ${createdKeys.size} row(s) of the failed import:`, cleanupError);
+            }
+        }
         await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
         await fs.rm(backupInlayDir, { recursive: true, force: true }).catch(() => {});
         throw error;
@@ -3139,6 +3180,7 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     // Trigger cold storage migration now so import result includes failure count.
     const dbRaw = kvGet('database/database.bin');
     let coldStorageFailed = 0;
+    let pluginStorageColdFailed = 0;
     if (dbRaw) {
         const migration = {};
         const dbObj = await decodeDatabaseWithPersistentChatIds(dbRaw, {
@@ -3146,6 +3188,7 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
             migrationResult: migration,
         });
         coldStorageFailed = migration.coldStorageFailed || 0;
+        pluginStorageColdFailed = migration.pluginStorageColdFailed || 0;
         await initChatStoreFromDisk(dbObj);
     }
 
@@ -3159,7 +3202,10 @@ async function importBackupFromSource(dataSource, { maxBytes = 0, totalBytes = 0
     if (coldStorageFailed > 0) {
         logger.error(`[Backup Import] ${coldStorageFailed} cold storage character(s) could not be restored`);
     }
-    return { assetsRestored, bytesReceived, coldStorageFailed };
+    if (pluginStorageColdFailed > 0) {
+        logger.error(`[Backup Import] ${pluginStorageColdFailed} plugin storage item(s) could not be restored from cold storage`);
+    }
+    return { assetsRestored, bytesReceived, coldStorageFailed, pluginStorageColdFailed };
 }
 
 app.get('/', async (req, res, next) => {
@@ -5481,11 +5527,15 @@ app.post('/api/backup/import', async (req, res, next) => {
     }
     importInProgress = true;
 
-    // Disable timeouts for large backup uploads
-    const prevRequestTimeout = req.socket.server?.requestTimeout;
+    // Disable timeouts for large backup uploads. Keep the server reference:
+    // when the upload is cut off (client abort, rejection mid-stream) the
+    // finally block runs after req.socket was detached, and reading
+    // req.socket.server there threw and took the whole process down.
+    const httpServer = req.socket.server;
+    const prevRequestTimeout = httpServer?.requestTimeout;
     req.socket.setTimeout(0);
     req.socket.setKeepAlive(true);
-    if (req.socket.server) req.socket.server.requestTimeout = 0;
+    if (httpServer) httpServer.requestTimeout = 0;
 
     // NDJSON streaming keeps the response socket alive during long
     // post-upload work (WAL checkpoint, cold-storage migration). Without it
@@ -5537,6 +5587,7 @@ app.post('/api/backup/import', async (req, res, next) => {
                 ok: true,
                 assetsRestored: result.assetsRestored,
                 coldStorageFailed: result.coldStorageFailed,
+                pluginStorageColdFailed: result.pluginStorageColdFailed,
             }) + '\n');
             res.end();
         } else {
@@ -5545,6 +5596,7 @@ app.post('/api/backup/import', async (req, res, next) => {
                 ok: true,
                 assetsRestored: result.assetsRestored,
                 coldStorageFailed: result.coldStorageFailed,
+                pluginStorageColdFailed: result.pluginStorageColdFailed,
             });
         }
     } catch (error) {
@@ -5559,8 +5611,8 @@ app.post('/api/backup/import', async (req, res, next) => {
     } finally {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         importInProgress = false;
-        if (req.socket.server && prevRequestTimeout !== undefined) {
-            req.socket.server.requestTimeout = prevRequestTimeout;
+        if (httpServer && prevRequestTimeout !== undefined) {
+            httpServer.requestTimeout = prevRequestTimeout;
         }
     }
 });
@@ -5781,6 +5833,7 @@ app.post('/api/backup/server/restore', async (req, res, next) => {
             ok: true,
             assetsRestored: result.assetsRestored,
             coldStorageFailed: result.coldStorageFailed,
+            pluginStorageColdFailed: result.pluginStorageColdFailed,
         }) + '\n');
         res.end();
     } catch (error) {
@@ -5938,50 +5991,87 @@ function restoreColdStorageCharactersInDb(dbObj) {
     return result;
 }
 
-// Upstream (cad8595a) keeps v3 pluginStorage values in cold storage and leaves
-// only a key -> cold id map in pluginCustomStorage._coldplugin. Fold the
-// values back inline so pluginStorage.migrateFromDb moves them into kv.
-// Keys whose entry is missing or unreadable stay in _coldplugin as recovery
-// breadcrumbs; their cold storage KV entries are never deleted.
-const COLD_PLUGIN_STORAGE_KEY = '_coldplugin';
+// Upstream keeps v3 pluginStorage values in cold storage: cad8595a leaves a
+// key -> cold id map in pluginCustomStorage._coldplugin, and 68b5d032c
+// (v2026.10.210+) a _coldpluginIndex pointer to one index item. Fold both back
+// into plain keys so pluginStorage.migrateFromDb moves them into kv (see
+// upstream-plugin-storage.cjs). Cold storage KV entries are never deleted.
+// What cannot be restored is recorded in nodeOnlyPluginStorageRecovery,
+// outside the plugin key space, so a reserved key never reaches a plugin or
+// an export to upstream, where it would be read as a live pointer.
+const PLUGIN_STORAGE_RECOVERY_KEY = 'nodeOnlyPluginStorageRecovery';
+
+function readColdPluginItem(coldId) {
+    try {
+        const entry = readColdStorageJsonEntry(coldId, { migrateLegacy: true });
+        return entry ? entry.coldData : undefined;
+    } catch (err) {
+        logger.error(`[ColdStorage] plugin storage item ${coldId} could not be read:`, err.message);
+        throw err;
+    }
+}
+
+function appendPluginStorageRecovery(dbObj, record) {
+    const existing = Array.isArray(dbObj[PLUGIN_STORAGE_RECOVERY_KEY]) ? dbObj[PLUGIN_STORAGE_RECOVERY_KEY] : [];
+    dbObj[PLUGIN_STORAGE_RECOVERY_KEY] = [...existing, record];
+}
+
+function logPluginStorageRestore(action, result) {
+    if (result.restored > 0) {
+        logger.info(`[ColdStorage] ${action} ${result.restored} plugin storage key(s) from cold storage`);
+    }
+    if (result.failed > 0) {
+        logger.error(`[ColdStorage] ${result.failed} plugin storage item(s) could not be restored; details are kept in ${PLUGIN_STORAGE_RECOVERY_KEY}. Cold storage KV data is preserved.`);
+    }
+}
 
 function restoreColdPluginStorageInDb(dbObj) {
-    const result = { restored: 0, failed: 0, failedKeys: [] };
     const storage = dbObj?.pluginCustomStorage;
-    if (!storage || typeof storage !== 'object' || Array.isArray(storage)) return result;
-    if (!Object.prototype.hasOwnProperty.call(storage, COLD_PLUGIN_STORAGE_KEY)) return result;
-    const map = storage[COLD_PLUGIN_STORAGE_KEY];
-    if (!map || typeof map !== 'object' || Array.isArray(map)) return result;
+    if (!upstreamPluginStorage.hasReservedKeys(storage)) return null;
+    const resolved = upstreamPluginStorage.resolveUpstreamPluginStorage(storage, {
+        readCold: readColdPluginItem,
+        isPresent: (key) => Object.prototype.hasOwnProperty.call(storage, key),
+        source: 'database',
+    });
+    for (const key of upstreamPluginStorage.RESERVED_KEYS) delete storage[key];
+    for (const [key, value] of resolved.assign) {
+        // defineProperty keeps a "__proto__" key an own property.
+        Object.defineProperty(storage, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    if (resolved.record) appendPluginStorageRecovery(dbObj, resolved.record);
+    return resolved;
+}
 
-    const remaining = {};
-    for (const key of Object.keys(map)) {
-        const coldId = map[key];
-        let entry = null;
+// Builds that did not know the index layout moved upstream's reserved keys
+// into kv as ordinary plugin keys (the pointer string, and _coldplugin
+// breadcrumbs). Resolve them the same way, once: the values already in kv are
+// live and win over the cold copies.
+function recoverLeakedPluginStorageKeys(dbObj) {
+    const leaked = {};
+    for (const key of upstreamPluginStorage.RESERVED_KEYS) {
+        let value = null;
         try {
-            entry = typeof coldId === 'string' && coldId
-                ? readColdStorageJsonEntry(coldId, { migrateLegacy: true })
-                : null;
+            value = pluginStorage.get(key);
         } catch (err) {
-            logger.error(`[ColdStorage] plugin storage key "${key}" (${coldId}) could not be read:`, err.message);
+            logger.error(`[PluginStorage] Reserved key "${key}" in kv could not be read:`, err.message);
         }
-        if (!entry) {
-            remaining[key] = coldId;
-            result.failed++;
-            result.failedKeys.push(key);
-            continue;
-        }
-        // The cold copy is upstream's live value; an inline key of the same
-        // name is a stale pre-migration leftover.
-        storage[key] = entry.coldData;
-        result.restored++;
+        if (value !== null && value !== undefined) leaked[key] = value;
     }
+    if (Object.keys(leaked).length === 0) return null;
 
-    if (Object.keys(remaining).length > 0) {
-        storage[COLD_PLUGIN_STORAGE_KEY] = remaining;
-    } else {
-        delete storage[COLD_PLUGIN_STORAGE_KEY];
-    }
-    return result;
+    createBackupAndRotate({ force: true });
+    const present = new Set(pluginStorage.list().map((entry) => entry.key));
+    const resolved = upstreamPluginStorage.resolveUpstreamPluginStorage(leaked, {
+        readCold: readColdPluginItem,
+        isPresent: (key) => present.has(key),
+        source: 'leaked-kv',
+    });
+    sqliteDb.transaction(() => {
+        for (const [key, value] of resolved.assign) pluginStorage.set(key, value);
+        for (const key of Object.keys(leaked)) pluginStorage.remove(key);
+    })();
+    if (resolved.record) appendPluginStorageRecovery(dbObj, resolved.record);
+    return resolved;
 }
 
 function isColdStorageChat(chat) {
@@ -6383,8 +6473,10 @@ app.post('/api/migrate/save-folder/upload', async (req, res, next) => {
 
     req.socket.setTimeout(0);
     req.socket.setKeepAlive(true);
-    const prevRequestTimeout = req.socket.server?.requestTimeout;
-    if (req.socket.server) req.socket.server.requestTimeout = 0;
+    // Same as /api/backup/import: req.socket can be detached by the finally block.
+    const httpServer = req.socket.server;
+    const prevRequestTimeout = httpServer?.requestTimeout;
+    if (httpServer) httpServer.requestTimeout = 0;
 
     try {
         const chunks = [];
@@ -6430,8 +6522,8 @@ app.post('/api/migrate/save-folder/upload', async (req, res, next) => {
         res.status(400).json({ error: error.message || 'Import failed' });
     } finally {
         importInProgress = false;
-        if (req.socket.server && prevRequestTimeout !== undefined) {
-            req.socket.server.requestTimeout = prevRequestTimeout;
+        if (httpServer && prevRequestTimeout !== undefined) {
+            httpServer.requestTimeout = prevRequestTimeout;
         }
     }
 });
