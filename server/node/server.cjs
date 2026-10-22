@@ -9316,7 +9316,10 @@ app.post('/api/tunnel/stop', async (req, res) => {
 app.use(expressErrorMiddleware);
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    res.status(500).json({ error: err?.message || 'internal server error' });
+    // Body parsers reject an oversized body with type 'entity.too.large'; keep
+    // its 413 so the client can show the size message instead of a generic one.
+    const status = err?.type === 'entity.too.large' ? 413 : 500;
+    res.status(status).json({ error: err?.message || 'internal server error' });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
