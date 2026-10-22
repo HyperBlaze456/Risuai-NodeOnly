@@ -40,7 +40,7 @@ export const languageEnglish = {
         persistFailureTitle: "Server save failed — changes are not being written to disk",
         persistFailureAttemptedSize: "attempted size",
         storageRequestTooLarge: "Save request failed because it is too large (HTTP 413). Check the request body size limit on the server or reverse proxy (Nginx, etc.).",
-        backupEncryptedAccount: "This backup was exported from RisuAI while logged in to a web account (sync), so its database is encrypted and PocketRisu cannot read it. In RisuAI, log out of the account (your data is moved to the device) or use Partial Backup, then export the backup again. Your existing data was not replaced.",
+        backupEncryptedAccount: "This backup was exported from the RisuAI web version (risuai.xyz). Its database is encrypted and can only be opened on risuai.xyz, so PocketRisu cannot read it. Turn on \"Save Data in Account\" in RisuAI, then use \"Import from RisuAI account\" in Settings > Data Migration. The migration guide has the steps. Your existing data was not replaced.",
         chatGuardTitle: "Chat data guard triggered — switched to safe save mode",
         chatGuardDesc: "Suspicious save patterns blocked. Your changes will be persisted via the safe full-write fallback. If this keeps happening, please report it with browser console logs.",
         chatGuardPersistTitle: "Save aborted to protect existing chat data",

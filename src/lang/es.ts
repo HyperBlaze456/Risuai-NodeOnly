@@ -34,7 +34,7 @@ export const languageSpanish = {
         "requestLogRemoved": "Este registro de solicitud ha sido eliminado.",
         "requestLogRemovedDesc": "Este registro de solicitud se elimina cuando el cliente se actualiza o recarga.",
         "vertexAuthError": "Faltan los detalles de autenticación de Vertex AI.",
-        "backupEncryptedAccount": "Esta copia de seguridad se exportó desde RisuAI con una cuenta web (sincronización) iniciada, por lo que su base de datos está cifrada y PocketRisu no puede leerla. En RisuAI, cierre la sesión de la cuenta (sus datos se mueven al dispositivo) o use la copia parcial y vuelva a exportar la copia de seguridad. Sus datos existentes no se han reemplazado.",
+        "backupEncryptedAccount": "Esta copia de seguridad se exportó desde la versión web de RisuAI (risuai.xyz). Su base de datos está cifrada y solo se puede abrir en risuai.xyz, por lo que PocketRisu no puede leerla. Activa \"Guardar Datos en la Cuenta\" en RisuAI y luego usa \"Importar desde la cuenta de RisuAI\" en Ajustes > Data Migration. Los pasos están en la guía de migración. Tus datos existentes no se han reemplazado.",
         "coldStorageWriteFailed": "Error al escribir en almacenamiento frío. Sus datos de chat se han conservado.",
         "coldStorageVerifyFailed": "Error en la verificación del almacenamiento frío. Sus datos de chat se han conservado."
     },

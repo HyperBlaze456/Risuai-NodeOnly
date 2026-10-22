@@ -34,7 +34,7 @@ export const languageGerman = {
         "requestLogRemoved": "Dieses Anfrage-Protokoll wurde entfernt.",
         "requestLogRemovedDesc": "Dieses Anfrage-Protokoll wird entfernt, wenn der Client aktualisiert oder neu geladen wird.",
         "vertexAuthError": "Vertex AI-Authentifizierungsdetails fehlen.",
-        "backupEncryptedAccount": "Dieses Backup wurde aus RisuAI exportiert, während ein Web-Konto (Sync) angemeldet war. Seine Datenbank ist daher verschlüsselt und PocketRisu kann sie nicht lesen. Melden Sie sich in RisuAI vom Konto ab (Ihre Daten werden auf das Gerät verschoben) oder verwenden Sie das teilweise Backup und exportieren Sie das Backup erneut. Ihre vorhandenen Daten wurden nicht ersetzt.",
+        "backupEncryptedAccount": "Dieses Backup wurde aus der Webversion von RisuAI (risuai.xyz) exportiert. Seine Datenbank ist verschlüsselt und kann nur auf risuai.xyz geöffnet werden, daher kann PocketRisu sie nicht lesen. Aktivieren Sie in RisuAI \"Daten im Konto speichern\" und verwenden Sie dann \"Aus RisuAI-Konto importieren\" unter Einstellungen > Data Migration. Die Schritte stehen im Migrationsleitfaden. Ihre vorhandenen Daten wurden nicht ersetzt.",
         "coldStorageWriteFailed": "Kaltlager-Schreibvorgang fehlgeschlagen. Ihre Chat-Daten wurden beibehalten.",
         "coldStorageVerifyFailed": "Kaltlager-Überprüfung fehlgeschlagen. Ihre Chat-Daten wurden beibehalten."
     },

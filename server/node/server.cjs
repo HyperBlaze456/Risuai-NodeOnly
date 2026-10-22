@@ -2916,8 +2916,8 @@ function backupImportError(message, code) {
 // its local backups since v2026.6.102 (kwaroran/RisuAI d0548267). The key is
 // fetched from sv.risuai.xyz per backup and is not obtainable from here.
 const BACKUP_ENCRYPTED_MESSAGE =
-    'This backup was exported from RisuAI while logged in to a web account (sync), so its database is encrypted and cannot be imported. ' +
-    'In RisuAI, log out of the account (your data is moved to the device) or use Partial Backup, then export again. Your existing database was not replaced.';
+    'This backup was exported from the RisuAI web version (risuai.xyz), so its database is encrypted and can only be opened on risuai.xyz. ' +
+    'Turn on "Save Data in Account" in RisuAI, then use "Import from RisuAI account" in Data Migration. Your existing database was not replaced.';
 
 // decodeRisuSave has lenient fallbacks that can turn random bytes into a
 // msgpack primitive instead of throwing, so the result must also be an object.
