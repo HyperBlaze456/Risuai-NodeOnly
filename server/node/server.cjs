@@ -2145,7 +2145,14 @@ async function checkDiskSpace(requiredBytes) {
 const { createSessionLock } = require('./session-lock.cjs');
 const sessionLock = createSessionLock();
 
-function checkActiveSession(req, res) {
+function checkActiveSession(req, res, { allowDuringAccountImport = false } = {}) {
+    // A started RisuAI account import will replace all data: nothing may
+    // write until it ends. Its own routes work from any open import screen.
+    if (risuAccountImport.isBlocking()) {
+        if (allowDuringAccountImport) return true
+        res.status(423).json({ error: 'A RisuAI account import is in progress', code: 'ACCOUNT_IMPORT_ACTIVE' })
+        return false
+    }
     const clientSessionId = req.headers['x-session-id']
     // The client attaches x-user-active only when a real user gesture happened
     // recently — automatic writes (boot housekeeping, flush-on-hide) carry no
@@ -3910,7 +3917,8 @@ app.post('/api/token/refresh', async (req, res) => {
 app.get('/api/session/lock-status', async (req, res) => {
     if (!await checkAuth(req, res)) return
     const id = req.headers['x-session-id']
-    res.json({ state: sessionLock.peek(typeof id === 'string' ? id : '') })
+    // During an account import every open page reloads into the import screen.
+    res.json({ state: risuAccountImport.isBlocking() ? 'stale' : sessionLock.peek(typeof id === 'string' ? id : '') })
 })
 
 // ── Session cookie issuance (F-0) ──────────────────────────────────────────
@@ -4321,6 +4329,7 @@ app.get('/api/remove', async (req, res, next) => {
     if(!await checkAuth(req, res)){
         return;
     }
+    if (!checkActiveSession(req, res)) return;
     const filePath = normalizeFilePathHeader(req.headers['file-path']);
     if (!filePath) {
         res.status(400).send({ error:'File path required' });
@@ -5714,6 +5723,123 @@ app.post('/api/backup/import', async (req, res, next) => {
         if (httpServer && prevRequestTimeout !== undefined) {
             httpServer.requestTimeout = prevRequestTimeout;
         }
+    }
+});
+
+// ── RisuAI account import ───────────────────────────────────────────────────
+// Downloads a risuai.xyz account (database, assets, cold storage) to a staging
+// folder, then applies it through importBackupFromSource. Logic lives in
+// risu-account-import.cjs; while an import is started, checkActiveSession
+// refuses every data write. POCKETRISU_RISU_ACCOUNT_URL points tests at a fake
+// account server and POCKETRISU_RISU_ACCOUNT_GAP_MS shortens the pause between
+// account requests there.
+const { createRisuAccountImport, AccountImportError } = require('./risu-account-import.cjs');
+const accountRequestGapMs = Number(process.env.POCKETRISU_RISU_ACCOUNT_GAP_MS);
+const risuAccountImport = createRisuAccountImport({
+    baseUrl: process.env.POCKETRISU_RISU_ACCOUNT_URL || undefined,
+    requestGapMs: process.env.POCKETRISU_RISU_ACCOUNT_GAP_MS && Number.isFinite(accountRequestGapMs) && accountRequestGapMs >= 0 ? accountRequestGapMs : undefined,
+    stagingDir: path.join(savePath, 'account_import_staging'),
+    logger,
+    decodeRisuSave,
+    encodeRisuSaveLegacy,
+    checkDiskSpace,
+    applyEntries: applyRisuAccountEntries,
+});
+
+async function applyRisuAccountEntries(entries, { totalBytes, onProgress }) {
+    if (importInProgress) {
+        throw new AccountImportError('Another import is already in progress', 'ACCOUNT_IMPORT_BUSY', 409);
+    }
+    importInProgress = true;
+    try {
+        // Writes accepted before the import started may still wait in the
+        // storage queue; they run before the swap, not after it. New ones are
+        // refused while the import blocks.
+        await queueStorageOperation(async () => {});
+        const disk = await checkDiskSpace(totalBytes * BACKUP_DISK_HEADROOM);
+        if (!disk.ok) {
+            throw new AccountImportError('Not enough free disk space to apply the import', 'ACCOUNT_DISK_FULL', 507);
+        }
+        try {
+            return await importBackupFromSource(entries, { totalBytes, onProgress });
+        } finally {
+            // Every page loaded before the swap holds the old data in memory.
+            // Also after a failure, which may come after the new data was
+            // committed (inlay folder swap).
+            sessionLock.revokeAll();
+        }
+    } finally {
+        importInProgress = false;
+    }
+}
+
+function sendAccountImportError(res, error, next) {
+    if (error?.code && typeof error.status === 'number') {
+        res.status(error.status).json({ error: error.message, code: error.code });
+        return;
+    }
+    next(error);
+}
+
+app.get('/api/risu-account/config', async (req, res) => {
+    if (!await checkAuth(req, res)) { return; }
+    res.json(risuAccountImport.config());
+});
+
+app.get('/api/risu-account/status', async (req, res, next) => {
+    if (!await checkAuth(req, res)) { return; }
+    try {
+        res.json(await risuAccountImport.status());
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.post('/api/risu-account/prepare', async (req, res, next) => {
+    if (!await checkAuth(req, res)) { return; }
+    if (!checkActiveSession(req, res, { allowDuringAccountImport: true })) return;
+    try {
+        // Reads the account database in the background; the client polls
+        // status for the summary (or the error).
+        risuAccountImport.prepare({ token: req.body?.token, id: req.body?.id });
+        res.json({ ok: true });
+    } catch (error) {
+        sendAccountImportError(res, error, next);
+    }
+});
+
+// The first call starts the import: from then on PocketRisu is blocked until
+// it is applied or cancelled.
+app.post('/api/risu-account/download', async (req, res, next) => {
+    if (!await checkAuth(req, res)) { return; }
+    if (!checkActiveSession(req, res, { allowDuringAccountImport: true })) return;
+    try {
+        res.json(risuAccountImport.startDownload());
+    } catch (error) {
+        sendAccountImportError(res, error, next);
+    }
+});
+
+app.post('/api/risu-account/cancel', async (req, res, next) => {
+    if (!await checkAuth(req, res)) { return; }
+    if (!checkActiveSession(req, res, { allowDuringAccountImport: true })) return;
+    try {
+        await risuAccountImport.cancel();
+        res.json({ ok: true });
+    } catch (error) {
+        sendAccountImportError(res, error, next);
+    }
+});
+
+// Applies a download with missing items once the user accepts them (one
+// without missing items applies by itself). Runs in the background.
+app.post('/api/risu-account/apply', async (req, res, next) => {
+    if (!await checkAuth(req, res)) { return; }
+    if (!checkActiveSession(req, res, { allowDuringAccountImport: true })) return;
+    try {
+        res.json(risuAccountImport.startApply());
+    } catch (error) {
+        sendAccountImportError(res, error, next);
     }
 });
 
