@@ -238,7 +238,9 @@
                 lastChatId = chatID
                 let translateText = false
                 try {
-                    if(DBState.db.autoTranslate){
+                    // The Auto Translation checkbox is hidden while Translator Language is
+                    // Disabled (''), so a stale autoTranslate must not keep translating.
+                    if(DBState.db.autoTranslate && DBState.db.translator){
                         if(DBState.db.autoTranslateCachedOnly && DBState.db.translatorType === 'llm'){
                             const cache = DBState.db.translateBeforeHTMLFormatting
                             ? await getLLMCache(data)
