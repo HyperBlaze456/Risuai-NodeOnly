@@ -1947,10 +1947,9 @@ export function purgeUnsupportedGroupChats(db: Database): number {
                 }
                 continue
             }
-            const data = entry.data.filter((id) => validIds.has(id))
-            if (data.length > 0) {
-                nextOrder.push({ ...entry, data })
-            }
+            // Empty folders are kept, as in checkCharOrder: the character
+            // manager creates a folder first and fills it afterwards.
+            nextOrder.push({ ...entry, data: entry.data.filter((id) => validIds.has(id)) })
         }
         db.characterOrder = nextOrder
     }
