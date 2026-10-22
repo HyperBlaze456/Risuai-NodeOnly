@@ -592,7 +592,7 @@ export async function saveDb() {
     // otherwise only after the user chose it, with the unsaved edits
     // downloadable first. Cancel keeps the tab open with saving paused.
     let handoffDialogOpen = false
-    async function resolveSessionHandoff(kind: 'tab' | 'return') {
+    async function resolveSessionHandoff(kind: 'tab' | 'return', reason: string | null = null) {
         if (handoffDialogOpen) return
         handoffDialogOpen = true
         try {
@@ -602,7 +602,7 @@ export async function saveDb() {
                 if (kind === 'return') {
                     try { sessionStorage.setItem('risu-session-handoff-reload', '1') } catch { /* toast is best-effort */ }
                 } else {
-                    await alertNormalWait(language.activeTabChange)
+                    await alertNormalWait(reason === 'ACCOUNT_IMPORT_ACTIVE' ? language.risuAccountImportActive : language.activeTabChange)
                 }
                 location.reload()
                 return
@@ -655,10 +655,10 @@ export async function saveDb() {
         if (changeTracker.plugins) out.plugins = db.plugins
         return JSON.stringify(out, null, 2)
     }
-    const handOffSession = () => {
+    const handOffSession = (event?: Event) => {
         if (gotChannel) return
         gotChannel = true
-        void resolveSessionHandoff('tab')
+        void resolveSessionHandoff('tab', (event as CustomEvent<{ code?: string | null }> | undefined)?.detail?.code ?? null)
     }
     if (channel) {
         channel.onmessage = (ev) => {

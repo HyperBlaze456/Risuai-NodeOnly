@@ -17,6 +17,7 @@ const AUTH_FETCH_TRANSIENT_JITTER_MIN = 0.5
 const AUTH_FETCH_TRANSIENT_JITTER_MAX = 1.5
 const AUTH_FETCH_TRANSIENT_STATUS = new Set([502, 503, 504])
 const FIRST_BYTE_TIMEOUT_MS = 30_000
+const RISU_ACCOUNT_REQUEST_TIMEOUT_MS = 30_000
 
 export type StorageFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
@@ -162,6 +163,62 @@ export interface SettingsBackupEstimate {
     dbBytes: number
     baseAssets: { count: number, bytes: number }
     moduleAssets: { count: number, bytes: number, moduleCount: number }
+}
+
+/** Server-side RisuAI account import (server/node/risu-account-import.cjs). */
+export type RisuAccountImportState =
+    'idle' | 'preparing' | 'ready' | 'downloading' | 'paused' | 'needs-login' | 'downloaded' | 'applying'
+
+export interface RisuAccountImportSummary {
+    accountId: string
+    characters: number
+    chats: number
+    assets: number
+    assetsStaged: number
+    cold: number
+    coldStaged: number
+    skipped: number
+    unresolvedRemotes: number
+    /** Blocks of the account database that could not be read (left out). */
+    damaged: number
+    damagedNames: string[]
+    estimatedSeconds: number
+}
+
+export interface RisuAccountImportStep {
+    done: number
+    total: number
+    bytes?: number
+}
+
+export interface RisuAccountImportStatus {
+    state: RisuAccountImportState
+    /** Set from the user's confirmation until the import is applied or cancelled; the app shows only the import screen. */
+    blocking: boolean
+    error: { message: string, code: string | null } | null
+    accountId: string | null
+    summary: RisuAccountImportSummary | null
+    /** The account check (database, remote characters). */
+    progress: { phase: 'database' | 'remotes', done: number, total: number | null, bytes: number } | null
+    phase: 'cold' | 'assets' | 'apply' | null
+    /** apply counts bytes. */
+    steps: { cold: RisuAccountImportStep, assets: RisuAccountImportStep, apply: RisuAccountImportStep | null } | null
+    remainingSeconds: number | null
+    missingCount: number
+    missing: { kind: 'asset' | 'cold', key: string, status: number, reason: 'not-found' | 'unreadable' }[]
+    result: { missing: number, assetsRestored?: number, coldStorageFailed?: number, pluginStorageColdFailed?: number } | null
+    /** Files already downloaded by a started import the server lost its plan for (after a restart). */
+    staged: { files: number, total: number | null } | null
+}
+
+export class RisuAccountImportError extends Error {
+    code: string | null
+    status: number
+    constructor(message: string, code: string | null, status: number) {
+        super(message)
+        this.code = code
+        this.status = status
+    }
 }
 
 export type AssetManifestTuple = [string, string] | [string, string, string]
@@ -454,7 +511,12 @@ export class NodeStorage{
         })
 
         if (response.status === 423) {
-            window.dispatchEvent(new CustomEvent('risu-session-deactivated'))
+            // ACCOUNT_IMPORT_ACTIVE: a RisuAI account import blocks every write.
+            let code: string | null = null
+            try {
+                code = (await response.clone().json())?.code ?? null
+            } catch { /* no JSON body */ }
+            window.dispatchEvent(new CustomEvent('risu-session-deactivated', { detail: { code } }))
         }
 
         if(retry && await this.shouldRetryAuth(response)){
@@ -1166,6 +1228,76 @@ export class NodeStorage{
 
     async downloadServerBackup(filename: string): Promise<void> {
         await this.startCookieDownload(`/api/backup/server/download/${encodeURIComponent(filename)}`)
+    }
+
+    // ── RisuAI account import ───────────────────────────────────────────────
+
+    private async risuAccountRequest<T>(urlPath: string, init: RequestInit = {}): Promise<T> {
+        // At boot this is the first request, and the login prompt it may
+        // show must not count against the time limit below. Later checks
+        // (session init) stay inside it.
+        if (!this.authChecked) await this.checkAuth()
+        // These calls answer at once (the work runs in the background). One
+        // whose answer, headers or body, is not complete in time is dropped,
+        // so the next status poll still runs on a dropped phone link. Raced
+        // as well as aborted: the auth pre-flight fetches do not carry the
+        // signal.
+        const controller = new AbortController()
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeout = new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+                controller.abort()
+                reject(new DOMException(`No complete answer within ${RISU_ACCOUNT_REQUEST_TIMEOUT_MS}ms`, 'AbortError'))
+            }, RISU_ACCOUNT_REQUEST_TIMEOUT_MS)
+        })
+        timeout.catch(() => {})
+        try {
+            const da = await Promise.race([this.authFetch(urlPath, { ...init, signal: controller.signal }), timeout])
+            const ok = da.status >= 200 && da.status < 300
+            // A success body that is cut off must fail, not read as an empty
+            // answer; only an error answer may lack a JSON body.
+            const body = await Promise.race([ok ? da.json() : da.json().catch(() => ({})), timeout])
+            if (!ok) {
+                throw new RisuAccountImportError(body.error || `RisuAI account import error: ${da.status}`, body.code ?? null, da.status)
+            }
+            return body as T
+        } finally {
+            clearTimeout(timer)
+        }
+    }
+
+    private postRisuAccount<T>(action: string, body: unknown = {}): Promise<T> {
+        return this.risuAccountRequest<T>(`/api/risu-account/${action}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+    }
+
+    getRisuAccountImportConfig(): Promise<{ loginUrl: string, loginOrigin: string }> {
+        return this.risuAccountRequest('/api/risu-account/config')
+    }
+
+    getRisuAccountImportStatus(): Promise<RisuAccountImportStatus> {
+        return this.risuAccountRequest('/api/risu-account/status')
+    }
+
+    /** Starts reading the account database; poll the status for the summary. */
+    async prepareRisuAccountImport(token: string, id: string): Promise<void> {
+        await this.postRisuAccount('prepare', { token, id })
+    }
+
+    async startRisuAccountDownload(): Promise<void> {
+        await this.postRisuAccount('download')
+    }
+
+    async cancelRisuAccountImport(): Promise<void> {
+        await this.postRisuAccount('cancel')
+    }
+
+    /** Applies a download that has missing items; poll the status for the outcome. */
+    async applyRisuAccountImport(): Promise<void> {
+        await this.postRisuAccount('apply')
     }
 
     // ── Chat content (runtime lazy load) ────────────────────────────────────
