@@ -18,6 +18,12 @@ const AUTH_FETCH_TRANSIENT_JITTER_MAX = 1.5
 const AUTH_FETCH_TRANSIENT_STATUS = new Set([502, 503, 504])
 const FIRST_BYTE_TIMEOUT_MS = 30_000
 const RISU_ACCOUNT_REQUEST_TIMEOUT_MS = 30_000
+// Every storage call waits for the shared authentication (test_auth,
+// password hashing, login, token refresh, session cookie), so one of those
+// requests that never answers (dropped phone link) would hold up the whole
+// app, boot included. Each is cut off after this long, headers and body;
+// only the password prompt waits for the user without a limit.
+const AUTH_REQUEST_TIMEOUT_MS = 30_000
 
 export type StorageFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
@@ -31,6 +37,25 @@ export interface AuthFetchRetryOptions {
 }
 
 const defaultStorageFetch: StorageFetch = (input, init) => fetch(input, init)
+
+/** fetch, then read the response, both within AUTH_REQUEST_TIMEOUT_MS. */
+async function authRequest<T>(input: string, init: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // Raced as well as aborted, like risuAccountRequest.
+    const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+            controller.abort()
+            reject(new DOMException(`No answer within ${AUTH_REQUEST_TIMEOUT_MS}ms: ${input}`, 'TimeoutError'))
+        }, AUTH_REQUEST_TIMEOUT_MS)
+    })
+    timeout.catch(() => {})
+    try {
+        return await Promise.race([fetch(input, { ...init, signal: controller.signal }).then(read), timeout])
+    } finally {
+        clearTimeout(timer)
+    }
+}
 const defaultAuthFetchRetryOptions: AuthFetchRetryOptions = {
     maxRetries: AUTH_FETCH_TRANSIENT_MAX_RETRIES,
     baseDelayMs: AUTH_FETCH_TRANSIENT_BASE_DELAY_MS,
@@ -306,19 +331,19 @@ export class NodeStorage{
 
     private async _doInitSession() {
         try {
-            const res = await fetch('/api/session', {
+            const ok = await authRequest('/api/session', {
                 method: 'POST',
                 headers: {
                     'risu-auth': await this.createAuth(),
                     'x-session-id': NodeStorage.sessionId,
                 },
-            })
-            if (res.ok) {
+            }, async (res) => res.ok)
+            if (ok) {
                 NodeStorage.sessionInitialized = true
             }
             // Non-ok (400/401/500): will retry on next checkAuth() call.
         } catch {
-            // Network error: will retry on next checkAuth() call.
+            // Network error or no answer in time: will retry on next checkAuth() call.
         } finally {
             NodeStorage.sessionPending = null
         }
@@ -332,12 +357,11 @@ export class NodeStorage{
     }
 
     private async _doRefreshToken(): Promise<string> {
-        const res = await fetch('/api/token/refresh', {
+        const data = await authRequest('/api/token/refresh', {
             method: 'POST',
             headers: { 'risu-auth': this.cachedJwt?.token ?? '' }
-        })
-        if (res.ok) {
-            const data = await res.json()
+        }, async (res) => res.ok ? await res.json() : null)
+        if (data) {
             this.cachedJwt = { token: data.token, expiresAt: Date.now() + 5 * 60 * 1000 }
             return data.token
         }
@@ -345,32 +369,28 @@ export class NodeStorage{
     }
 
     private async loginWithPassword(password: string) {
-        const response = await fetch('/api/login', {
+        const { status, data } = await authRequest('/api/login', {
             method: "POST",
             body: JSON.stringify({ password }),
             headers: {
                 'content-type': 'application/json'
             }
-        })
+        }, async (response) => ({
+            status: response.status,
+            // A success must carry JSON; an error body is optional.
+            data: response.ok ? await response.json() : await response.json().catch(() => null),
+        }))
 
-        if(response.status === 429){
+        if(status === 429){
             notifyError(`Too many attempts. Please wait and try again later.`)
             await waitAlert()
             throw new Error('Too many login attempts')
         }
 
-        if(response.status < 200 || response.status >= 300){
-            let message = 'Node login failed'
-            try {
-                const data = await response.json()
-                message = data.error ?? message
-            } catch {
-                // noop
-            }
-            throw new Error(message)
+        if(status < 200 || status >= 300){
+            throw new Error(data?.error ?? 'Node login failed')
         }
 
-        const data = await response.json()
         if (data.token) {
             this.cachedJwt = { token: data.token, expiresAt: Date.now() + 5 * 60 * 1000 }
         }
@@ -674,15 +694,15 @@ export class NodeStorage{
     private async runAuthCheck(){
 
         if(!this.authChecked){
-            const data = await (await fetch('/api/test_auth',{
+            const data = await authRequest('/api/test_auth',{
                 headers: {
                     'risu-auth': this.cachedJwt?.token ?? ''
                 }
-            })).json()
+            }, (res) => res.json())
 
             if(data.status === 'unset'){
                 const input = await digestPassword(await alertInput(language.setNodePassword))
-                const response = await fetch('/api/set_password',{
+                const status = await authRequest('/api/set_password',{
                     method: "POST",
                     body:JSON.stringify({
                         password: input 
@@ -690,9 +710,9 @@ export class NodeStorage{
                     headers: {
                         'content-type': 'application/json'
                     }
-                })
+                }, async (res) => res.status)
 
-                if(response.status < 200 || response.status >= 300){
+                if(status < 200 || status >= 300){
                     throw new Error('Failed to set node password')
                 }
 
@@ -1546,7 +1566,7 @@ export class NodeStorage{
 }
 
 async function digestPassword(message:string) {
-    const res = await fetch('/api/crypto', {
+    return await authRequest('/api/crypto', {
         body: JSON.stringify({
             data: message
         }),
@@ -1554,11 +1574,12 @@ async function digestPassword(message:string) {
             'content-type': 'application/json'
         },
         method: "POST"
+    }, async (res) => {
+        if(res.status < 200 || res.status >= 300){
+            throw new Error(`Password hashing failed (${res.status})`)
+        }
+        return await res.text()
     })
-    if(res.status < 200 || res.status >= 300){
-        throw new Error(`Password hashing failed (${res.status})`)
-    }
-    return await res.text()
 }
 
 /** Failure reported by the character archive endpoints; `code` is the server's error code. */
